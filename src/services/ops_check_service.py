@@ -2,14 +2,11 @@ from datetime import datetime, timezone
 import os
 from typing import Any
 
+from src.services.apim_synthetic_check_service import build_apim_synthetic_check
 from src.services.virtual_graph_service import (
     build_data_protection_report,
     build_graph_signal,
 )
-
-
-def _check_status_to_bool(status: str) -> bool:
-    return status.upper() in {"PASS", "READY"}
 
 
 def _build_basic_backend_status() -> dict[str, Any]:
@@ -38,55 +35,8 @@ def _build_ops_configuration_status() -> dict[str, Any]:
         "name": "Ops console configuration",
         "status": "PASS",
         "category": "configuration",
-        "message": "Ops console has minimum configuration for local operational demo",
+        "message": "Ops console has minimum configuration for operational demo",
         "details": configured_items,
-    }
-
-
-def _build_apim_synthetic_readiness() -> dict[str, Any]:
-    """
-    This does not call APIM yet.
-
-    The live APIM/JWT check will be implemented in the next phase after we decide
-    where to store synthetic credentials safely for demo mode.
-    """
-
-    expected_env_vars = [
-        "OPS_APIM_GATEWAY_URL",
-        "OPS_APIM_SUBSCRIPTION_KEY",
-        "OPS_SYNTHETIC_CLIENT_ID",
-        "OPS_SYNTHETIC_CLIENT_SECRET",
-        "OPS_DSR_API_APP_ID",
-        "OPS_TENANT_ID",
-    ]
-
-    configured = {
-        name: bool(os.getenv(name))
-        for name in expected_env_vars
-    }
-
-    missing = [
-        name
-        for name, is_configured in configured.items()
-        if not is_configured
-    ]
-
-    status = "READY" if not missing else "PENDING"
-
-    return {
-        "name": "APIM/JWT synthetic check readiness",
-        "status": status,
-        "category": "apim",
-        "message": (
-            "APIM/JWT live synthetic check is ready to run"
-            if status == "READY"
-            else "APIM/JWT live synthetic check is not configured yet; this is expected before Phase 7.5"
-        ),
-        "details": {
-            "configured": configured,
-            "missing": missing,
-            "note": "No secret values are returned by this endpoint.",
-        },
     }
 
 
@@ -120,31 +70,60 @@ def _wrap_data_protection_report() -> dict[str, Any]:
     }
 
 
+def _classify_status(status: str) -> str:
+    """
+    Normalize check status for summary.
+
+    PASS: fully passed.
+    READY: configured/available, not a failure.
+    PENDING: not configured yet or intentionally skipped.
+    PASS_WITH_PENDING: partial pass but still has pending sub-checks.
+    FAIL: failed.
+    """
+
+    normalized = (status or "").upper()
+
+    if normalized == "FAIL":
+        return "fail"
+
+    if normalized in {"PENDING", "PASS_WITH_PENDING"}:
+        return "pending"
+
+    if normalized == "READY":
+        return "ready"
+
+    if normalized == "PASS":
+        return "pass"
+
+    return "pending"
+
+
 def build_full_system_check() -> dict[str, Any]:
+    """
+    Build the top-level operational health report for the demo environment.
+
+    This check is designed for browser-based operations:
+    - basic backend status
+    - ops console configuration
+    - virtual Graph / SharePoint signal
+    - data protection validation
+    - APIM/JWT synthetic live check
+    """
+
     checks = [
         _build_basic_backend_status(),
         _build_ops_configuration_status(),
         _wrap_graph_signal(),
         _wrap_data_protection_report(),
-        _build_apim_synthetic_readiness(),
+        build_apim_synthetic_check(),
     ]
 
-    failed_checks = [
-        check
-        for check in checks
-        if check["status"] == "FAIL"
-    ]
+    classified = [_classify_status(check.get("status", "")) for check in checks]
 
-    pending_checks = [
-        check
-        for check in checks
-        if check["status"] == "PENDING"
-    ]
-
-    pass_count = sum(1 for check in checks if check["status"] == "PASS")
-    ready_count = sum(1 for check in checks if check["status"] == "READY")
-    pending_count = len(pending_checks)
-    fail_count = len(failed_checks)
+    pass_count = classified.count("pass")
+    ready_count = classified.count("ready")
+    pending_count = classified.count("pending")
+    fail_count = classified.count("fail")
 
     if fail_count > 0:
         overall_status = "FAIL"
@@ -163,10 +142,18 @@ def build_full_system_check() -> dict[str, Any]:
             "fail": fail_count,
         },
         "checks": checks,
+        "interpretation": {
+            "PASS": "All configured checks passed.",
+            "PASS_WITH_PENDING": (
+                "Core demo checks passed, but at least one live or optional check "
+                "is still pending configuration."
+            ),
+            "FAIL": "At least one required operational check failed.",
+        },
         "nextPhase": (
-            "Configure browser-based APIM/JWT synthetic check in Phase 7.5"
-            if pending_count > 0
-            else "All configured checks are ready"
+            "Configure APIM/JWT synthetic env vars and rerun Full System Check."
+            if overall_status == "PASS_WITH_PENDING"
+            else "All configured checks are complete."
         ),
         "timestampUtc": datetime.now(timezone.utc).isoformat(),
     }

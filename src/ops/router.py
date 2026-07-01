@@ -4,6 +4,7 @@ import os
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
+from src.services.apim_synthetic_check_service import build_apim_synthetic_check
 from src.services.ops_check_service import build_full_system_check
 from src.services.virtual_graph_service import (
     build_data_protection_report,
@@ -119,7 +120,7 @@ OPS_CONSOLE_HTML = """
             padding: 16px;
             border-radius: 10px;
             overflow-x: auto;
-            min-height: 300px;
+            min-height: 330px;
             white-space: pre-wrap;
         }
 
@@ -144,6 +145,14 @@ OPS_CONSOLE_HTML = """
 
         .button-primary:hover {
             background: #15803d;
+        }
+
+        .button-apim {
+            background: #7c3aed;
+        }
+
+        .button-apim:hover {
+            background: #6d28d9;
         }
     </style>
 </head>
@@ -184,12 +193,22 @@ OPS_CONSOLE_HTML = """
                 </tr>
                 <tr>
                     <td>Virtual Graph Signal</td>
-                    <td class="warn">READY</td>
+                    <td class="warn">CHECK VIA API</td>
                     <td>Use Virtual Graph Signal Check</td>
                 </tr>
                 <tr>
+                    <td>Data Protection</td>
+                    <td class="warn">CHECK VIA API</td>
+                    <td>Use Data Protection Check</td>
+                </tr>
+                <tr>
+                    <td>APIM/JWT Synthetic</td>
+                    <td class="warn">CHECK VIA API</td>
+                    <td>Use APIM/JWT Synthetic Check</td>
+                </tr>
+                <tr>
                     <td>Full System Check</td>
-                    <td class="warn">READY</td>
+                    <td class="warn">CHECK VIA API</td>
                     <td>Use Run Full System Check</td>
                 </tr>
             </table>
@@ -200,10 +219,11 @@ OPS_CONSOLE_HTML = """
             <p class="muted">
                 Đây là bảng kiểm tra vận hành của mô hình Enterprise API Gateway POC.
                 Full System Check sẽ gom basic status, virtual Graph signal, data protection
-                và trạng thái sẵn sàng cho APIM/JWT synthetic check.
+                và APIM/JWT synthetic live check.
             </p>
 
             <button id="btn-full-check" class="button-primary">Run Full System Check</button>
+            <button id="btn-apim-synthetic" class="button-apim">Run APIM/JWT Synthetic Check</button>
             <button id="btn-status">Run Basic Status Check</button>
             <button id="btn-graph">Run Virtual Graph Signal</button>
             <button id="btn-data-protection">Run Data Protection Check</button>
@@ -229,16 +249,27 @@ OPS_CONSOLE_HTML = """
             const key = getOpsKey();
             const url = `${endpoint}?key=${encodeURIComponent(key)}`;
 
-            showResult(`Running check: ${url}`);
+            showResult(`Running check: ${url}\\nPlease wait...`);
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(function () {
+                controller.abort();
+            }, 60000);
 
             try {
+                const startedAt = performance.now();
+
                 const response = await fetch(url, {
                     method: "GET",
                     headers: {
                         "Accept": "application/json"
-                    }
+                    },
+                    signal: controller.signal
                 });
 
+                clearTimeout(timeoutId);
+
+                const durationMs = Math.round(performance.now() - startedAt);
                 const text = await response.text();
 
                 let data;
@@ -248,21 +279,25 @@ OPS_CONSOLE_HTML = """
                     data = {
                         status: "FAIL",
                         message: "Response is not valid JSON",
-                        httpStatus: response.status,
                         rawResponse: text
                     };
                 }
 
                 showResult({
+                    uiStatus: "COMPLETED",
                     httpStatus: response.status,
                     ok: response.ok,
                     endpoint: endpoint,
+                    durationMs: durationMs,
                     response: data
                 });
             } catch (error) {
+                clearTimeout(timeoutId);
+
                 showResult({
-                    status: "FAIL",
+                    uiStatus: "FAILED",
                     endpoint: endpoint,
+                    message: "Browser could not complete the request",
                     error: String(error)
                 });
             }
@@ -270,12 +305,17 @@ OPS_CONSOLE_HTML = """
 
         document.addEventListener("DOMContentLoaded", function () {
             const fullCheckButton = document.getElementById("btn-full-check");
+            const apimSyntheticButton = document.getElementById("btn-apim-synthetic");
             const statusButton = document.getElementById("btn-status");
             const graphButton = document.getElementById("btn-graph");
             const dataProtectionButton = document.getElementById("btn-data-protection");
 
             fullCheckButton.addEventListener("click", function () {
                 callOpsApi("/ops/api/full-check");
+            });
+
+            apimSyntheticButton.addEventListener("click", function () {
+                callOpsApi("/ops/api/apim-synthetic");
             });
 
             statusButton.addEventListener("click", function () {
@@ -337,8 +377,13 @@ def ops_status(key: str | None = Query(default=None)):
                 "message": "Use /ops/api/data-protection to run the check",
             },
             {
+                "name": "APIM/JWT synthetic check",
+                "status": "CHECK_VIA_API",
+                "message": "Use /ops/api/apim-synthetic to run the live synthetic check",
+            },
+            {
                 "name": "Full system check",
-                "status": "READY",
+                "status": "CHECK_VIA_API",
                 "message": "Use /ops/api/full-check to run the combined operational check",
             },
         ],
@@ -355,6 +400,12 @@ def graph_signal(key: str | None = Query(default=None)):
 def data_protection_check(key: str | None = Query(default=None)):
     _check_ops_key(key)
     return build_data_protection_report()
+
+
+@router.get("/api/apim-synthetic")
+def apim_synthetic_check(key: str | None = Query(default=None)):
+    _check_ops_key(key)
+    return build_apim_synthetic_check()
 
 
 @router.get("/api/full-check")
