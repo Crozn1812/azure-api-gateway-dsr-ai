@@ -168,3 +168,147 @@ def build_graph_signal() -> dict[str, Any]:
         "samplePublicItem": public_projection[0] if public_projection else None,
         "timestampUtc": datetime.now(timezone.utc).isoformat(),
     }
+PUBLIC_DSR_FIELDS = {
+    "requestId",
+    "title",
+    "status",
+    "createdDate",
+    "updatedDate",
+    "hptOwner",
+    "sharedNote",
+}
+
+SENSITIVE_SOURCE_FIELDS = {
+    "RequesterEmail",
+    "requesterEmail",
+    "InternalNote",
+    "internalNote",
+    "PersonalData",
+    "personalData",
+    "RawDescription",
+    "rawDescription",
+}
+
+
+def build_data_protection_report() -> dict[str, Any]:
+    """
+    Build a dedicated data protection validation report.
+
+    This proves that:
+    - raw Graph-shaped source contains sensitive fields
+    - public API projection does not expose sensitive fields
+    - public output follows the approved allowlist contract
+    """
+
+    graph_response = get_virtual_graph_dsr_items()
+    raw_items = graph_response.get("value", [])
+    public_projection = get_public_dsr_projection_from_virtual_graph()
+
+    raw_field_names = set()
+    for item in raw_items:
+        fields = item.get("fields", {})
+        raw_field_names.update(fields.keys())
+
+    raw_sensitive_fields_found = sorted(
+        field for field in SENSITIVE_SOURCE_FIELDS if field in raw_field_names
+    )
+
+    public_payload_validation = validate_no_sensitive_fields(public_projection)
+
+    public_items_field_report = []
+    invalid_public_fields = set()
+    missing_required_fields_by_item = []
+
+    for item in public_projection:
+        item_fields = set(item.keys())
+        invalid_fields = item_fields - PUBLIC_DSR_FIELDS
+        missing_fields = PUBLIC_DSR_FIELDS - item_fields
+
+        invalid_public_fields.update(invalid_fields)
+
+        public_items_field_report.append(
+            {
+                "requestId": item.get("requestId"),
+                "fieldCount": len(item_fields),
+                "fields": sorted(item_fields),
+                "invalidFields": sorted(invalid_fields),
+                "missingRequiredFields": sorted(missing_fields),
+            }
+        )
+
+        if missing_fields:
+            missing_required_fields_by_item.append(
+                {
+                    "requestId": item.get("requestId"),
+                    "missingRequiredFields": sorted(missing_fields),
+                }
+            )
+
+    checks = [
+        {
+            "name": "Raw source contains sensitive fields",
+            "status": "PASS" if raw_sensitive_fields_found else "WARN",
+            "message": (
+                "Raw Graph-shaped source includes sensitive fields for validation"
+                if raw_sensitive_fields_found
+                else "No sensitive fields found in raw source; validation is less meaningful"
+            ),
+        },
+        {
+            "name": "Public projection blocks sensitive fields",
+            "status": public_payload_validation["status"],
+            "message": (
+                "No sensitive fields leaked to public payload"
+                if public_payload_validation["status"] == "PASS"
+                else "Sensitive fields leaked to public payload"
+            ),
+        },
+        {
+            "name": "Public projection uses allowlist fields only",
+            "status": "PASS" if not invalid_public_fields else "FAIL",
+            "message": (
+                "Public payload contains only approved fields"
+                if not invalid_public_fields
+                else "Public payload contains fields outside allowlist"
+            ),
+        },
+        {
+            "name": "Public projection has required fields",
+            "status": "PASS" if not missing_required_fields_by_item else "FAIL",
+            "message": (
+                "All public items include required contract fields"
+                if not missing_required_fields_by_item
+                else "Some public items are missing required fields"
+            ),
+        },
+        {
+            "name": "Raw and public item count match",
+            "status": "PASS" if len(raw_items) == len(public_projection) else "FAIL",
+            "message": f"Raw items: {len(raw_items)}, public items: {len(public_projection)}",
+        },
+    ]
+
+    failed_checks = [check for check in checks if check["status"] == "FAIL"]
+
+    return {
+        "status": "PASS" if not failed_checks else "FAIL",
+        "purpose": "Validate that partner-facing API output does not leak sensitive SharePoint fields",
+        "rawSource": {
+            "provider": "Virtual Microsoft Graph",
+            "site": "DSR",
+            "list": "DSRRequests",
+            "rawItemCount": len(raw_items),
+            "rawSensitiveFieldsFound": raw_sensitive_fields_found,
+        },
+        "publicProjection": {
+            "publicItemCount": len(public_projection),
+            "allowedFields": sorted(PUBLIC_DSR_FIELDS),
+            "invalidPublicFields": sorted(invalid_public_fields),
+            "missingRequiredFieldsByItem": missing_required_fields_by_item,
+            "leakedSensitiveFields": public_payload_validation["leakedFields"],
+            "sensitiveFieldCount": public_payload_validation["sensitiveFieldCount"],
+        },
+        "checks": checks,
+        "samplePublicItem": public_projection[0] if public_projection else None,
+        "timestampUtc": datetime.now(timezone.utc).isoformat(),
+    }

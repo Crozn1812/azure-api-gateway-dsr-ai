@@ -4,7 +4,10 @@ import os
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
-from src.services.virtual_graph_service import build_graph_signal
+from src.services.virtual_graph_service import (
+    build_data_protection_report,
+    build_graph_signal,
+)
 
 
 router = APIRouter(prefix="/ops", tags=["Operations Console"])
@@ -181,6 +184,7 @@ OPS_CONSOLE_HTML = """
 
             <button onclick="runStatusCheck()">Run Basic Status Check</button>
             <button onclick="runGraphSignal()">Run Virtual Graph Signal</button>
+            <button onclick="runDataProtectionCheck()">Run Data Protection Check</button>
 
             <pre id="result">Chưa chạy check.</pre>
         </div>
@@ -204,6 +208,14 @@ OPS_CONSOLE_HTML = """
             const res = await fetch(`/ops/api/graph-signal?key=${encodeURIComponent(key)}`);
             const data = await res.json();
             document.getElementById("result").textContent = JSON.stringify(data, null, 2);
+        }
+
+        async function runDataProtectionCheck() {
+            const key = getOpsKey();
+            const res = await fetch(`/ops/api/data-protection?key=${encodeURIComponent(key)}`);
+            const data = await res.json();
+            document.getElementById("result").textContent = JSON.stringify(data, null, 2);
+        }
         }
     </script>
 </body>
@@ -262,3 +274,7 @@ def ops_status(key: str | None = Query(default=None)):
 def graph_signal(key: str | None = Query(default=None)):
     _check_ops_key(key)
     return build_graph_signal()
+@router.get("/api/data-protection")
+def data_protection_check(key: str | None = Query(default=None)):
+    _check_ops_key(key)
+    return build_data_protection_report()
