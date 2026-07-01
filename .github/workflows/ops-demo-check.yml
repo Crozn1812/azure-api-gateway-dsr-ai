@@ -1,0 +1,166 @@
+name: Ops Demo Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ops-demo-check:
+    name: Run Ops Console checks
+    runs-on: ubuntu-latest
+
+    env:
+      OPS_BASE_URL: ${{ secrets.OPS_BASE_URL }}
+      OPS_CONSOLE_KEY: ${{ secrets.OPS_CONSOLE_KEY }}
+
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          if [ -z "$OPS_BASE_URL" ]; then
+            echo "OPS_BASE_URL is missing"
+            exit 1
+          fi
+
+          if [ -z "$OPS_CONSOLE_KEY" ]; then
+            echo "OPS_CONSOLE_KEY is missing"
+            exit 1
+          fi
+
+          echo "Required secrets exist."
+
+      - name: Run operational checks
+        shell: python
+        run: |
+          import json
+          import os
+          import sys
+          import time
+          import urllib.parse
+          import urllib.request
+          import urllib.error
+
+          base_url = os.environ["OPS_BASE_URL"].rstrip("/")
+          ops_key = os.environ["OPS_CONSOLE_KEY"]
+
+          def request_json(path, require_key=True, expected_status=200, timeout=60):
+              if require_key:
+                  query = urllib.parse.urlencode({"key": ops_key})
+                  url = f"{base_url}{path}?{query}"
+                  safe_url = f"{base_url}{path}?key=***"
+              else:
+                  url = f"{base_url}{path}"
+                  safe_url = url
+
+              started = time.time()
+
+              try:
+                  with urllib.request.urlopen(url, timeout=timeout) as response:
+                      status = response.status
+                      body = response.read().decode("utf-8", errors="replace")
+              except urllib.error.HTTPError as exc:
+                  status = exc.code
+                  body = exc.read().decode("utf-8", errors="replace")
+              except Exception as exc:
+                  raise AssertionError(f"Request failed for {safe_url}: {exc}") from exc
+
+              duration_ms = round((time.time() - started) * 1000, 2)
+
+              if status != expected_status:
+                  raise AssertionError(
+                      f"{safe_url} returned HTTP {status}, expected {expected_status}. "
+                      f"Body: {body[:500]}"
+                  )
+
+              try:
+                  payload = json.loads(body)
+              except json.JSONDecodeError as exc:
+                  raise AssertionError(
+                      f"{safe_url} did not return valid JSON. Body: {body[:500]}"
+                  ) from exc
+
+              return {
+                  "url": safe_url,
+                  "httpStatus": status,
+                  "durationMs": duration_ms,
+                  "payload": payload,
+              }
+
+          results = []
+
+          print("Checking /health ...")
+          health = request_json("/health", require_key=False)
+          if health["payload"].get("status") != "running":
+              raise AssertionError(f"/health did not report running: {health['payload']}")
+          results.append({
+              "name": "Health endpoint",
+              "status": "PASS",
+              "durationMs": health["durationMs"],
+          })
+
+          print("Checking /ops/api/status ...")
+          status_check = request_json("/ops/api/status")
+          if status_check["payload"].get("status") != "PASS":
+              raise AssertionError(f"Ops status failed: {status_check['payload']}")
+          results.append({
+              "name": "Ops status",
+              "status": "PASS",
+              "durationMs": status_check["durationMs"],
+          })
+
+          print("Checking /ops/api/graph-signal ...")
+          graph = request_json("/ops/api/graph-signal")
+          if graph["payload"].get("status") != "PASS":
+              raise AssertionError(f"Graph signal failed: {graph['payload']}")
+          results.append({
+              "name": "Virtual Graph signal",
+              "status": "PASS",
+              "durationMs": graph["durationMs"],
+          })
+
+          print("Checking /ops/api/data-protection ...")
+          data_protection = request_json("/ops/api/data-protection")
+          if data_protection["payload"].get("status") != "PASS":
+              raise AssertionError(f"Data protection failed: {data_protection['payload']}")
+          results.append({
+              "name": "Data protection",
+              "status": "PASS",
+              "durationMs": data_protection["durationMs"],
+          })
+
+          print("Checking /ops/api/apim-synthetic ...")
+          apim = request_json("/ops/api/apim-synthetic", timeout=90)
+          if apim["payload"].get("status") != "PASS":
+              raise AssertionError(f"APIM/JWT synthetic check failed: {apim['payload']}")
+          if apim["payload"].get("summary", {}).get("fail") != 0:
+              raise AssertionError(f"APIM/JWT synthetic has failed checks: {apim['payload']}")
+          results.append({
+              "name": "APIM/JWT synthetic",
+              "status": "PASS",
+              "durationMs": apim["durationMs"],
+          })
+
+          print("Checking /ops/api/full-check ...")
+          full = request_json("/ops/api/full-check", timeout=120)
+          full_payload = full["payload"]
+
+          if full_payload.get("overallStatus") != "PASS":
+              raise AssertionError(f"Full system check did not PASS: {full_payload}")
+
+          summary = full_payload.get("summary", {})
+          if summary.get("fail") != 0:
+              raise AssertionError(f"Full system check has failed checks: {full_payload}")
+
+          if summary.get("pending") != 0:
+              raise AssertionError(f"Full system check has pending checks: {full_payload}")
+
+          results.append({
+              "name": "Full system check",
+              "status": "PASS",
+              "durationMs": full["durationMs"],
+          })
+
+          print("")
+          print("Operational check summary:")
+          print(json.dumps(results, indent=2, ensure_ascii=False))
+          print("")
+          print("All Ops Demo checks passed.")
