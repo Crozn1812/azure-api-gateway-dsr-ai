@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException, Header 
 from fastapi.responses import JSONResponse
-
+from src.ops.router import router as ops_router
 from src.middleware.apim_mock import ApimMockMiddleware
 from src.models.dsr import (
     DsrListResponse,
@@ -28,6 +28,7 @@ app = FastAPI(
 )
 
 app.add_middleware(ApimMockMiddleware)
+app.include_router(ops_router)
 
 
 @app.exception_handler(HTTPException)
