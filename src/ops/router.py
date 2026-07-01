@@ -118,7 +118,8 @@ OPS_CONSOLE_HTML = """
             padding: 16px;
             border-radius: 10px;
             overflow-x: auto;
-            min-height: 220px;
+            min-height: 260px;
+            white-space: pre-wrap;
         }
 
         .pass {
@@ -130,6 +131,11 @@ OPS_CONSOLE_HTML = """
             color: #fde68a;
             font-weight: bold;
         }
+
+        .fail {
+            color: #fca5a5;
+            font-weight: bold;
+        }
     </style>
 </head>
 
@@ -139,7 +145,7 @@ OPS_CONSOLE_HTML = """
             <h1>DSR API Gateway Ops Console</h1>
             <p class="muted">
                 Operational demo environment for Azure API Gateway DSR API.
-                Không cần gõ lệnh để chứng minh hệ thống còn sống. Cuối cùng cũng bớt giống nghi lễ triệu hồi terminal.
+                Không cần gõ lệnh để chứng minh hệ thống còn sống.
             </p>
             <span class="status">OPS CONSOLE ONLINE</span>
         </div>
@@ -178,13 +184,13 @@ OPS_CONSOLE_HTML = """
         <div class="card">
             <h2>Operational Checks</h2>
             <p class="muted">
-                Các check đang có: basic backend status và virtual Graph/SharePoint signal.
-                Các bước sau sẽ thêm APIM, JWT, backend direct protection và full system check.
+                Các check đang có: basic backend status, virtual Graph/SharePoint signal và data protection validation.
+                Các bước sau sẽ thêm full system check.
             </p>
 
-            <button onclick="runStatusCheck()">Run Basic Status Check</button>
-            <button onclick="runGraphSignal()">Run Virtual Graph Signal</button>
-            <button onclick="runDataProtectionCheck()">Run Data Protection Check</button>
+            <button id="btn-status">Run Basic Status Check</button>
+            <button id="btn-graph">Run Virtual Graph Signal</button>
+            <button id="btn-data-protection">Run Data Protection Check</button>
 
             <pre id="result">Chưa chạy check.</pre>
         </div>
@@ -196,27 +202,75 @@ OPS_CONSOLE_HTML = """
             return params.get("key") || "";
         }
 
-        async function runStatusCheck() {
-            const key = getOpsKey();
-            const res = await fetch(`/ops/api/status?key=${encodeURIComponent(key)}`);
-            const data = await res.json();
-            document.getElementById("result").textContent = JSON.stringify(data, null, 2);
+        function showResult(value) {
+            const result = document.getElementById("result");
+            result.textContent = typeof value === "string"
+                ? value
+                : JSON.stringify(value, null, 2);
         }
 
-        async function runGraphSignal() {
+        async function callOpsApi(endpoint) {
             const key = getOpsKey();
-            const res = await fetch(`/ops/api/graph-signal?key=${encodeURIComponent(key)}`);
-            const data = await res.json();
-            document.getElementById("result").textContent = JSON.stringify(data, null, 2);
+            const url = `${endpoint}?key=${encodeURIComponent(key)}`;
+
+            showResult(`Running check: ${url}`);
+
+            try {
+                const response = await fetch(url, {
+                    method: "GET",
+                    headers: {
+                        "Accept": "application/json"
+                    }
+                });
+
+                const text = await response.text();
+
+                let data;
+                try {
+                    data = JSON.parse(text);
+                } catch {
+                    data = {
+                        status: "FAIL",
+                        message: "Response is not valid JSON",
+                        httpStatus: response.status,
+                        rawResponse: text
+                    };
+                }
+
+                showResult({
+                    httpStatus: response.status,
+                    ok: response.ok,
+                    endpoint: endpoint,
+                    response: data
+                });
+            } catch (error) {
+                showResult({
+                    status: "FAIL",
+                    endpoint: endpoint,
+                    error: String(error)
+                });
+            }
         }
 
-        async function runDataProtectionCheck() {
-            const key = getOpsKey();
-            const res = await fetch(`/ops/api/data-protection?key=${encodeURIComponent(key)}`);
-            const data = await res.json();
-            document.getElementById("result").textContent = JSON.stringify(data, null, 2);
-        }
-        }
+        document.addEventListener("DOMContentLoaded", function () {
+            const statusButton = document.getElementById("btn-status");
+            const graphButton = document.getElementById("btn-graph");
+            const dataProtectionButton = document.getElementById("btn-data-protection");
+
+            statusButton.addEventListener("click", function () {
+                callOpsApi("/ops/api/status");
+            });
+
+            graphButton.addEventListener("click", function () {
+                callOpsApi("/ops/api/graph-signal");
+            });
+
+            dataProtectionButton.addEventListener("click", function () {
+                callOpsApi("/ops/api/data-protection");
+            });
+
+            showResult("Ops Console UI loaded. Bấm một nút để chạy check.");
+        });
     </script>
 </body>
 </html>
@@ -257,14 +311,14 @@ def ops_status(key: str | None = Query(default=None)):
                 "message": "Use /ops/api/graph-signal to run the check",
             },
             {
+                "name": "Data protection validation",
+                "status": "READY",
+                "message": "Use /ops/api/data-protection to run the check",
+            },
+            {
                 "name": "Full system check",
                 "status": "PENDING",
                 "message": "Will be implemented in Phase 7.4",
-            },
-            {
-                "name": "Data protection validation",
-                "status": "PENDING",
-                "message": "Will be implemented in Phase 7.3",
             },
         ],
     }
@@ -274,6 +328,8 @@ def ops_status(key: str | None = Query(default=None)):
 def graph_signal(key: str | None = Query(default=None)):
     _check_ops_key(key)
     return build_graph_signal()
+
+
 @router.get("/api/data-protection")
 def data_protection_check(key: str | None = Query(default=None)):
     _check_ops_key(key)
