@@ -11,15 +11,19 @@ env:
   ACR_NAME: acrdsrapi31862
   CONTAINER_APP_NAME: ca-dsr-api-phase3
   IMAGE_NAME: dsr-api
-  IMAGE_TAG: latest
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    environment: production
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+
+      - name: Set image tag
+        run: |
+          echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
       - name: Azure login
         uses: azure/login@v2
@@ -39,6 +43,11 @@ jobs:
             --name $CONTAINER_APP_NAME \
             --resource-group $RESOURCE_GROUP \
             --image $ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG
+
+      - name: Show deployed image
+        run: |
+          echo "Deployed image:"
+          echo "$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG"
 
       - name: Show Container App URL
         run: |
