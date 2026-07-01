@@ -1,0 +1,6 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+infra/parameters.dev.json
+infra/main.json

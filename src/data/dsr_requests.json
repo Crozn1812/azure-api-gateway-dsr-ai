@@ -1,0 +1,44 @@
+[
+  {
+    "requestId": "DSR-2026-0001",
+    "title": "Yêu cầu tra cứu trạng thái xử lý",
+    "status": "InProgress",
+    "createdDate": "2026-06-20T08:30:00Z",
+    "updatedDate": "2026-06-22T02:15:00Z",
+    "hptOwner": "DSR Team",
+    "sharedNote": "Đang xử lý theo SLA đã thống nhất",
+
+    "requesterEmail": "customer001@example.com",
+    "internalNote": "Khách hàng có yêu cầu gấp, cần kiểm tra thêm với bộ phận pháp chế.",
+    "personalData": "Thông tin định danh cá nhân đã được ẩn trong API public.",
+    "rawDescription": "Đối tác yêu cầu cập nhật trạng thái xử lý hồ sơ DSR đang gần đến hạn SLA."
+  },
+  {
+    "requestId": "DSR-2026-0002",
+    "title": "Yêu cầu cập nhật thông tin phản hồi",
+    "status": "Open",
+    "createdDate": "2026-06-21T03:20:00Z",
+    "updatedDate": "2026-06-21T05:45:00Z",
+    "hptOwner": "Privacy Operation",
+    "sharedNote": "Đã tiếp nhận và đang phân loại yêu cầu.",
+
+    "requesterEmail": "customer002@example.com",
+    "internalNote": "Cần xác minh phạm vi dữ liệu trước khi phản hồi.",
+    "personalData": "Dữ liệu cá nhân nội bộ không được trả ra ngoài.",
+    "rawDescription": "Người dùng yêu cầu xác nhận dữ liệu đã được xử lý theo chính sách bảo vệ dữ liệu."
+  },
+  {
+    "requestId": "DSR-2026-0003",
+    "title": "Yêu cầu kiểm tra SLA",
+    "status": "Closed",
+    "createdDate": "2026-06-18T01:00:00Z",
+    "updatedDate": "2026-06-19T10:00:00Z",
+    "hptOwner": "DSR Team",
+    "sharedNote": "Yêu cầu đã hoàn tất và phản hồi cho đối tác.",
+
+    "requesterEmail": "customer003@example.com",
+    "internalNote": "Không phát sinh vấn đề bảo mật.",
+    "personalData": "Ẩn khỏi response public.",
+    "rawDescription": "Yêu cầu đã được xử lý và đóng theo quy trình."
+  }
+]
