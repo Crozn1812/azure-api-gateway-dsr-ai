@@ -4,3 +4,10 @@ __pycache__
 *.pyc
 infra/parameters.dev.json
 infra/main.json
+apim/policies/*.generated.xml
+apim/policies/*backup*.xml
+apim-policy-body.json
+apim-policy-rollback-body.json
+app-roles.json
+app-role-assignment.json
+set-token-v2.json
