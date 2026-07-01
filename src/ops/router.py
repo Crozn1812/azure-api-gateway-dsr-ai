@@ -4,6 +4,7 @@ import os
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
+from src.services.ops_check_service import build_full_system_check
 from src.services.virtual_graph_service import (
     build_data_protection_report,
     build_graph_signal,
@@ -118,7 +119,7 @@ OPS_CONSOLE_HTML = """
             padding: 16px;
             border-radius: 10px;
             overflow-x: auto;
-            min-height: 260px;
+            min-height: 300px;
             white-space: pre-wrap;
         }
 
@@ -135,6 +136,14 @@ OPS_CONSOLE_HTML = """
         .fail {
             color: #fca5a5;
             font-weight: bold;
+        }
+
+        .button-primary {
+            background: #16a34a;
+        }
+
+        .button-primary:hover {
+            background: #15803d;
         }
     </style>
 </head>
@@ -178,16 +187,23 @@ OPS_CONSOLE_HTML = """
                     <td class="warn">READY</td>
                     <td>Use Virtual Graph Signal Check</td>
                 </tr>
+                <tr>
+                    <td>Full System Check</td>
+                    <td class="warn">READY</td>
+                    <td>Use Run Full System Check</td>
+                </tr>
             </table>
         </div>
 
         <div class="card">
             <h2>Operational Checks</h2>
             <p class="muted">
-                Các check đang có: basic backend status, virtual Graph/SharePoint signal và data protection validation.
-                Các bước sau sẽ thêm full system check.
+                Đây là bảng kiểm tra vận hành của mô hình Enterprise API Gateway POC.
+                Full System Check sẽ gom basic status, virtual Graph signal, data protection
+                và trạng thái sẵn sàng cho APIM/JWT synthetic check.
             </p>
 
+            <button id="btn-full-check" class="button-primary">Run Full System Check</button>
             <button id="btn-status">Run Basic Status Check</button>
             <button id="btn-graph">Run Virtual Graph Signal</button>
             <button id="btn-data-protection">Run Data Protection Check</button>
@@ -253,9 +269,14 @@ OPS_CONSOLE_HTML = """
         }
 
         document.addEventListener("DOMContentLoaded", function () {
+            const fullCheckButton = document.getElementById("btn-full-check");
             const statusButton = document.getElementById("btn-status");
             const graphButton = document.getElementById("btn-graph");
             const dataProtectionButton = document.getElementById("btn-data-protection");
+
+            fullCheckButton.addEventListener("click", function () {
+                callOpsApi("/ops/api/full-check");
+            });
 
             statusButton.addEventListener("click", function () {
                 callOpsApi("/ops/api/status");
@@ -317,8 +338,8 @@ def ops_status(key: str | None = Query(default=None)):
             },
             {
                 "name": "Full system check",
-                "status": "PENDING",
-                "message": "Will be implemented in Phase 7.4",
+                "status": "READY",
+                "message": "Use /ops/api/full-check to run the combined operational check",
             },
         ],
     }
@@ -334,3 +355,9 @@ def graph_signal(key: str | None = Query(default=None)):
 def data_protection_check(key: str | None = Query(default=None)):
     _check_ops_key(key)
     return build_data_protection_report()
+
+
+@router.get("/api/full-check")
+def full_system_check(key: str | None = Query(default=None)):
+    _check_ops_key(key)
+    return build_full_system_check()
