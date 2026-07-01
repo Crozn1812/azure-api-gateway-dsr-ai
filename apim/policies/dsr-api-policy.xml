@@ -1,0 +1,46 @@
+<!--
+Production hardening TODO:
+- Add validate-jwt policy with Microsoft Entra ID.
+- Add rate-limit/quota when APIM tier supports it.
+- Add IP allowlist if partner IP ranges are known.
+- Replace demo-partner-key with secure backend authentication.
+- Keep backend-internal-secret in APIM Named Value or Key Vault reference.
+-->
+
+<policies>
+    <inbound>
+        <base />
+
+        <set-header name="x-correlation-id" exists-action="skip">
+            <value>@(System.Guid.NewGuid().ToString())</value>
+        </set-header>
+
+        <check-header name="x-partner-id"
+                      failed-check-httpcode="401"
+                      failed-check-error-message="Missing partner id."
+                      ignore-case="false">
+            <value>partner-a</value>
+        </check-header>
+
+        <set-header name="x-api-key" exists-action="override">
+            <value>demo-partner-key</value>
+        </set-header>
+
+        <set-header name="x-apim-internal-secret" exists-action="override">
+            <value>{{backend-internal-secret}}</value>
+        </set-header>
+    </inbound>
+
+    <backend>
+        <base />
+    </backend>
+
+    <outbound>
+        <base />
+        <set-header name="x-powered-by" exists-action="delete" />
+    </outbound>
+
+    <on-error>
+        <base />
+    </on-error>
+</policies>
