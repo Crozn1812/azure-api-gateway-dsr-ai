@@ -10,7 +10,7 @@ from src.models.dsr import (
     DsrAiResponse,
     Paging,
 )
-from src.services.sharepoint_mock_service import (
+from src.services.dsr_service import (
     get_dsr_requests,
     get_dsr_request_by_id,
     get_reference_data,
