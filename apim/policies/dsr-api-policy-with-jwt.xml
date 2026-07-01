@@ -1,0 +1,48 @@
+<policies>
+    <inbound>
+        <base />
+
+        <!-- Production OAuth2/JWT validation -->
+        <validate-jwt header-name="Authorization"
+                      require-scheme="Bearer"
+                      failed-validation-httpcode="401"
+                      failed-validation-error-message="Unauthorized. Access token is missing or invalid.">
+            <openid-config url="https://login.microsoftonline.com/{{tenant-id}}/v2.0/.well-known/openid-configuration" />
+            <audiences>
+                <audience>api://{{dsr-api-client-id}}</audience>
+            </audiences>
+        </validate-jwt>
+
+        <set-header name="x-correlation-id" exists-action="skip">
+            <value>@(System.Guid.NewGuid().ToString())</value>
+        </set-header>
+
+        <check-header name="x-partner-id"
+                      failed-check-httpcode="401"
+                      failed-check-error-message="Missing partner id."
+                      ignore-case="false">
+            <value>partner-a</value>
+        </check-header>
+
+        <set-header name="x-api-key" exists-action="override">
+            <value>demo-partner-key</value>
+        </set-header>
+
+        <set-header name="x-apim-internal-secret" exists-action="override">
+            <value>{{backend-internal-secret}}</value>
+        </set-header>
+    </inbound>
+
+    <backend>
+        <base />
+    </backend>
+
+    <outbound>
+        <base />
+        <set-header name="x-powered-by" exists-action="delete" />
+    </outbound>
+
+    <on-error>
+        <base />
+    </on-error>
+</policies>
