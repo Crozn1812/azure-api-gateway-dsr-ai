@@ -16,6 +16,12 @@ REQUIRED_APIM_SYNTHETIC_ENV_VARS = [
     "OPS_APIM_SUBSCRIPTION_KEY",
 ]
 
+TOKEN_TIMEOUT_SECONDS = 30
+APIM_TIMEOUT_SECONDS = 60
+APIM_RETRY_ATTEMPTS = 2
+APIM_RETRY_DELAY_SECONDS = 5
+BACKEND_TIMEOUT_SECONDS = 30
+
 
 def _get_env(name: str, default: str | None = None) -> str | None:
     value = os.getenv(name, default)
@@ -88,6 +94,35 @@ def _make_check(
     }
 
 
+def _request_get_with_retry(
+    url: str,
+    headers: dict[str, str],
+    timeout_seconds: int,
+    attempts: int,
+) -> tuple[requests.Response | None, float, int, str | None]:
+    started_at = time.time()
+    last_error: str | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout_seconds,
+            )
+            duration_ms = round((time.time() - started_at) * 1000, 2)
+            return response, duration_ms, attempt, None
+
+        except requests.RequestException as exc:
+            last_error = str(exc)
+
+            if attempt < attempts:
+                time.sleep(APIM_RETRY_DELAY_SECONDS)
+
+    duration_ms = round((time.time() - started_at) * 1000, 2)
+    return None, duration_ms, attempts, last_error
+
+
 def _acquire_access_token() -> tuple[str | None, dict[str, Any]]:
     tenant_id = _get_env("OPS_TENANT_ID")
     client_id = _get_env("OPS_SYNTHETIC_CLIENT_ID")
@@ -109,7 +144,7 @@ def _acquire_access_token() -> tuple[str | None, dict[str, Any]]:
         response = requests.post(
             token_url,
             data=form_data,
-            timeout=20,
+            timeout=TOKEN_TIMEOUT_SECONDS,
         )
 
         duration_ms = round((time.time() - start_time) * 1000, 2)
@@ -174,43 +209,21 @@ def _acquire_access_token() -> tuple[str | None, dict[str, Any]]:
         )
 
 
-def _call_apim_missing_token(apim_endpoint: str, apim_subscription_key: str) -> dict[str, Any]:
-    start_time = time.time()
+def _call_apim_missing_token(
+    apim_endpoint: str,
+    apim_subscription_key: str,
+) -> dict[str, Any]:
+    response, duration_ms, attempts_used, error = _request_get_with_retry(
+        url=apim_endpoint,
+        headers={
+            "x-partner-id": "partner-a",
+            "Ocp-Apim-Subscription-Key": apim_subscription_key,
+        },
+        timeout_seconds=APIM_TIMEOUT_SECONDS,
+        attempts=APIM_RETRY_ATTEMPTS,
+    )
 
-    try:
-        response = requests.get(
-            apim_endpoint,
-            headers={
-                "x-partner-id": "partner-a",
-                "Ocp-Apim-Subscription-Key": apim_subscription_key,
-            },
-            timeout=20,
-        )
-
-        duration_ms = round((time.time() - start_time) * 1000, 2)
-
-        expected = response.status_code == 401
-
-        return _make_check(
-            name="APIM missing token rejection",
-            status="PASS" if expected else "FAIL",
-            message=(
-                "APIM correctly rejected request without Bearer token"
-                if expected
-                else "APIM did not return expected 401 for missing token"
-            ),
-            http_status=response.status_code,
-            duration_ms=duration_ms,
-            details={
-                "expectedHttpStatus": 401,
-                "endpoint": apim_endpoint,
-                "responseSnippet": _safe_response_body(response),
-            },
-        )
-
-    except requests.RequestException as exc:
-        duration_ms = round((time.time() - start_time) * 1000, 2)
-
+    if response is None:
         return _make_check(
             name="APIM missing token rejection",
             status="FAIL",
@@ -218,9 +231,32 @@ def _call_apim_missing_token(apim_endpoint: str, apim_subscription_key: str) -> 
             duration_ms=duration_ms,
             details={
                 "endpoint": apim_endpoint,
-                "error": str(exc),
+                "attemptsUsed": attempts_used,
+                "timeoutSecondsPerAttempt": APIM_TIMEOUT_SECONDS,
+                "error": error,
             },
         )
+
+    expected = response.status_code == 401
+
+    return _make_check(
+        name="APIM missing token rejection",
+        status="PASS" if expected else "FAIL",
+        message=(
+            "APIM correctly rejected request without Bearer token"
+            if expected
+            else "APIM did not return expected 401 for missing token"
+        ),
+        http_status=response.status_code,
+        duration_ms=duration_ms,
+        details={
+            "expectedHttpStatus": 401,
+            "endpoint": apim_endpoint,
+            "attemptsUsed": attempts_used,
+            "timeoutSecondsPerAttempt": APIM_TIMEOUT_SECONDS,
+            "responseSnippet": _safe_response_body(response),
+        },
+    )
 
 
 def _call_apim_valid_token(
@@ -228,63 +264,18 @@ def _call_apim_valid_token(
     apim_subscription_key: str,
     access_token: str,
 ) -> dict[str, Any]:
-    start_time = time.time()
+    response, duration_ms, attempts_used, error = _request_get_with_retry(
+        url=apim_endpoint,
+        headers={
+            "x-partner-id": "partner-a",
+            "Ocp-Apim-Subscription-Key": apim_subscription_key,
+            "Authorization": f"Bearer {access_token}",
+        },
+        timeout_seconds=APIM_TIMEOUT_SECONDS,
+        attempts=APIM_RETRY_ATTEMPTS,
+    )
 
-    try:
-        response = requests.get(
-            apim_endpoint,
-            headers={
-                "x-partner-id": "partner-a",
-                "Ocp-Apim-Subscription-Key": apim_subscription_key,
-                "Authorization": f"Bearer {access_token}",
-            },
-            timeout=20,
-        )
-
-        duration_ms = round((time.time() - start_time) * 1000, 2)
-
-        parsed_body: dict[str, Any] = {}
-        try:
-            parsed_body = response.json()
-        except ValueError:
-            parsed_body = {}
-
-        has_correlation_id = "correlationId" in parsed_body
-        has_data = isinstance(parsed_body.get("data"), list)
-        has_expected_item = "DSR-2026-0001" in response.text
-
-        expected = (
-            response.status_code == 200
-            and has_correlation_id
-            and has_data
-            and has_expected_item
-        )
-
-        return _make_check(
-            name="APIM valid token data access",
-            status="PASS" if expected else "FAIL",
-            message=(
-                "APIM accepted valid subscription key and JWT token, then returned DSR data"
-                if expected
-                else "APIM valid token call did not return expected DSR API response"
-            ),
-            http_status=response.status_code,
-            duration_ms=duration_ms,
-            details={
-                "expectedHttpStatus": 200,
-                "endpoint": apim_endpoint,
-                "hasCorrelationId": has_correlation_id,
-                "hasDataArray": has_data,
-                "hasExpectedItem": has_expected_item,
-                "itemCount": len(parsed_body.get("data", [])) if has_data else 0,
-                "responseSnippet": _safe_response_body(response),
-                "tokenValueHidden": True,
-            },
-        )
-
-    except requests.RequestException as exc:
-        duration_ms = round((time.time() - start_time) * 1000, 2)
-
+    if response is None:
         return _make_check(
             name="APIM valid token data access",
             status="FAIL",
@@ -292,10 +283,53 @@ def _call_apim_valid_token(
             duration_ms=duration_ms,
             details={
                 "endpoint": apim_endpoint,
-                "error": str(exc),
+                "attemptsUsed": attempts_used,
+                "timeoutSecondsPerAttempt": APIM_TIMEOUT_SECONDS,
+                "error": error,
                 "tokenValueHidden": True,
             },
         )
+
+    parsed_body: dict[str, Any] = {}
+    try:
+        parsed_body = response.json()
+    except ValueError:
+        parsed_body = {}
+
+    has_correlation_id = "correlationId" in parsed_body
+    has_data = isinstance(parsed_body.get("data"), list)
+    has_expected_item = "DSR-2026-0001" in response.text
+
+    expected = (
+        response.status_code == 200
+        and has_correlation_id
+        and has_data
+        and has_expected_item
+    )
+
+    return _make_check(
+        name="APIM valid token data access",
+        status="PASS" if expected else "FAIL",
+        message=(
+            "APIM accepted valid subscription key and JWT token, then returned DSR data"
+            if expected
+            else "APIM valid token call did not return expected DSR API response"
+        ),
+        http_status=response.status_code,
+        duration_ms=duration_ms,
+        details={
+            "expectedHttpStatus": 200,
+            "endpoint": apim_endpoint,
+            "attemptsUsed": attempts_used,
+            "timeoutSecondsPerAttempt": APIM_TIMEOUT_SECONDS,
+            "hasCorrelationId": has_correlation_id,
+            "hasDataArray": has_data,
+            "hasExpectedItem": has_expected_item,
+            "itemCount": len(parsed_body.get("data", [])) if has_data else 0,
+            "responseSnippet": _safe_response_body(response),
+            "tokenValueHidden": True,
+        },
+    )
 
 
 def _call_backend_direct_protection() -> dict[str, Any]:
@@ -322,11 +356,10 @@ def _call_backend_direct_protection() -> dict[str, Any]:
                 "x-partner-id": "partner-a",
                 "x-api-key": backend_api_key,
             },
-            timeout=20,
+            timeout=BACKEND_TIMEOUT_SECONDS,
         )
 
         duration_ms = round((time.time() - start_time) * 1000, 2)
-
         expected = response.status_code == 403
 
         return _make_check(
