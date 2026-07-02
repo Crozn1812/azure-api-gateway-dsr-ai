@@ -163,7 +163,7 @@ OPS_CONSOLE_HTML = """
             <h1>DSR API Gateway Ops Console</h1>
             <p class="muted">
                 Operational demo environment for Azure API Gateway DSR API.
-                Không cần gõ lệnh để chứng minh hệ thống còn sống.
+                
             </p>
             <span class="status">OPS CONSOLE ONLINE</span>
         </div>
