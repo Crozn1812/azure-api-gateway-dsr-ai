@@ -1,85 +1,222 @@
-﻿from datetime import datetime, timezone
+﻿import inspect
 import os
+from typing import Any, Dict, List
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
 
-from src.services.apim_synthetic_check_service import build_apim_synthetic_check
-from src.services.ops_check_service import build_full_system_check
-from src.services.virtual_graph_service import (
-    build_data_protection_report,
-    build_graph_signal,
-)
+from src.services import apim_synthetic_check_service
+from src.services import ops_check_service
+from src.services import virtual_graph_service
 
 
-router = APIRouter(prefix="/ops", tags=["Operations Console"])
+router = APIRouter()
 
 
-def _ops_enabled() -> bool:
-    return os.getenv("ENABLE_OPS_CONSOLE", "true").lower() == "true"
+class PartnerMatrixOpsRequest(BaseModel):
+    partnerId: str = Field(..., example="partner-a")
+    requestedFields: List[str] = Field(..., example=["a", "b", "c"])
 
 
-def _check_ops_key(key: str | None) -> None:
+def require_ops_key(key: str | None) -> None:
     expected_key = os.getenv("OPS_CONSOLE_KEY", "demo-ops-key")
 
-    if not _ops_enabled():
-        raise HTTPException(status_code=404, detail="Ops console is disabled")
+    if not expected_key:
+        raise HTTPException(status_code=403, detail="Ops console key is not configured.")
 
-    if expected_key and key != expected_key:
-        raise HTTPException(status_code=403, detail="Invalid ops console key")
+    if key != expected_key:
+        raise HTTPException(status_code=403, detail="Invalid ops console key.")
+
+
+async def maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def call_service_function(module: Any, candidate_names: List[str]) -> Any:
+    for name in candidate_names:
+        func = getattr(module, name, None)
+        if callable(func):
+            return await maybe_await(func())
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"Service function not found. Tried: {', '.join(candidate_names)}",
+    )
+
+
+def clean_url_join(base: str, path: str, suffix: str) -> str:
+    return f"{base.rstrip('/')}/{path.strip('/')}/{suffix.lstrip('/')}"
+
+
+async def get_partner_access_token() -> str:
+    tenant_id = os.getenv("OPS_TENANT_ID")
+    api_app_id = os.getenv("OPS_DSR_API_APP_ID")
+    client_id = os.getenv("OPS_SYNTHETIC_CLIENT_ID")
+    client_secret = os.getenv("OPS_SYNTHETIC_CLIENT_SECRET")
+
+    missing = [
+        name
+        for name, value in {
+            "OPS_TENANT_ID": tenant_id,
+            "OPS_DSR_API_APP_ID": api_app_id,
+            "OPS_SYNTHETIC_CLIENT_ID": client_id,
+            "OPS_SYNTHETIC_CLIENT_SECRET": client_secret,
+        }.items()
+        if not value
+    ]
+
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing token environment variables: {', '.join(missing)}",
+        )
+
+    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+
+    payload = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": f"api://{api_app_id}/.default",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(token_url, data=payload)
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to acquire Entra ID access token.",
+                "statusCode": response.status_code,
+                "response": response.text[:500],
+            },
+        )
+
+    token_data = response.json()
+    access_token = token_data.get("access_token")
+
+    if not access_token:
+        raise HTTPException(
+            status_code=500,
+            detail="Token response does not contain access_token.",
+        )
+
+    return access_token
+
+
+async def call_partner_matrix_via_apim(payload: PartnerMatrixOpsRequest) -> Dict[str, Any]:
+    apim_gateway = os.getenv("OPS_APIM_GATEWAY_URL")
+    api_path = os.getenv("OPS_API_PATH", "partner-api")
+    subscription_key = os.getenv("OPS_APIM_SUBSCRIPTION_KEY")
+
+    missing = [
+        name
+        for name, value in {
+            "OPS_APIM_GATEWAY_URL": apim_gateway,
+            "OPS_APIM_SUBSCRIPTION_KEY": subscription_key,
+        }.items()
+        if not value
+    ]
+
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing APIM environment variables: {', '.join(missing)}",
+        )
+
+    access_token = await get_partner_access_token()
+
+    endpoint = clean_url_join(
+        apim_gateway,
+        api_path,
+        "/partner/dsr/matrix-request",
+    )
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-partner-id": payload.partnerId,
+        "Ocp-Apim-Subscription-Key": subscription_key,
+        "Authorization": f"Bearer {access_token}",
+    }
+
+    request_body = {
+        "partnerId": payload.partnerId,
+        "requestedFields": payload.requestedFields,
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(endpoint, headers=headers, json=request_body)
+
+    try:
+        response_body = response.json()
+    except Exception:
+        response_body = {
+            "rawResponse": response.text,
+        }
+
+    return {
+        "apimRoute": {
+            "gatewayUrl": apim_gateway,
+            "apiPath": api_path,
+            "operation": "POST /partner/dsr/matrix-request",
+            "calledThroughApim": True,
+            "apimLogged": True,
+        },
+        "httpStatusCode": response.status_code,
+        "result": response_body,
+    }
 
 
 OPS_CONSOLE_HTML = """
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="en">
 <head>
-    <meta charset="UTF-8" />
+    <meta charset="UTF-8">
     <title>DSR API Gateway Ops Console</title>
     <style>
         body {
-            font-family: Arial, sans-serif;
             background: #0f172a;
-            color: #e5e7eb;
+            color: #f8fafc;
+            font-family: Arial, sans-serif;
             margin: 0;
-            padding: 32px;
+            padding: 24px;
         }
 
         .container {
-            max-width: 1100px;
-            margin: 0 auto;
+            max-width: 1180px;
+            margin: auto;
         }
 
         .card {
-            background: #111827;
             border: 1px solid #334155;
-            border-radius: 14px;
-            padding: 22px;
-            margin-bottom: 18px;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            background: #111827;
         }
 
-        h1 {
-            margin: 0 0 8px;
-            font-size: 28px;
-        }
-
-        h2 {
+        h1, h2, h3 {
             margin-top: 0;
-            font-size: 20px;
-            color: #bfdbfe;
         }
 
         .muted {
-            color: #94a3b8;
+            color: #93c5fd;
+            font-size: 14px;
         }
 
         .status {
             display: inline-block;
             padding: 6px 12px;
             border-radius: 999px;
-            background: #064e3b;
-            color: #bbf7d0;
+            background: #047857;
+            color: white;
             font-weight: bold;
+            font-size: 13px;
         }
 
         table {
@@ -90,325 +227,547 @@ OPS_CONSOLE_HTML = """
 
         th, td {
             border-bottom: 1px solid #334155;
-            padding: 12px;
+            padding: 10px;
             text-align: left;
+            font-size: 14px;
         }
 
         th {
             color: #93c5fd;
         }
 
+        .pass {
+            color: #22c55e;
+            font-weight: bold;
+        }
+
+        .warn {
+            color: #facc15;
+            font-weight: bold;
+        }
+
+        .fail {
+            color: #ef4444;
+            font-weight: bold;
+        }
+
         button {
             background: #2563eb;
             color: white;
             border: none;
-            border-radius: 10px;
-            padding: 12px 18px;
+            border-radius: 7px;
+            padding: 10px 14px;
+            margin: 6px 6px 6px 0;
             cursor: pointer;
             font-weight: bold;
-            margin-right: 8px;
-            margin-bottom: 8px;
         }
 
         button:hover {
             background: #1d4ed8;
         }
 
-        pre {
-            background: #020617;
-            border: 1px solid #334155;
-            padding: 16px;
-            border-radius: 10px;
-            overflow-x: auto;
-            min-height: 330px;
-            white-space: pre-wrap;
-        }
-
-        .pass {
-            color: #86efac;
-            font-weight: bold;
-        }
-
-        .warn {
-            color: #fde68a;
-            font-weight: bold;
-        }
-
-        .fail {
-            color: #fca5a5;
-            font-weight: bold;
-        }
-
-        .button-primary {
+        .button-green {
             background: #16a34a;
         }
 
-        .button-primary:hover {
+        .button-green:hover {
             background: #15803d;
         }
 
-        .button-apim {
+        .button-purple {
             background: #7c3aed;
         }
 
-        .button-apim:hover {
+        .button-purple:hover {
             background: #6d28d9;
+        }
+
+        input, select {
+            width: 100%;
+            box-sizing: border-box;
+            background: #020617;
+            color: #f8fafc;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 10px;
+            margin: 6px 0 12px 0;
+        }
+
+        label {
+            font-weight: bold;
+            font-size: 14px;
+            color: #bfdbfe;
+        }
+
+        pre, .result-box {
+            background: #020617;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            padding: 14px;
+            min-height: 120px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 9px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .badge-pass {
+            background: #064e3b;
+            color: #6ee7b7;
+        }
+
+        .badge-fail {
+            background: #7f1d1d;
+            color: #fecaca;
+        }
+
+        .badge-warn {
+            background: #713f12;
+            color: #fde68a;
         }
     </style>
 </head>
-
 <body>
-    <div class="container">
-        <div class="card">
-            <h1>DSR API Gateway Ops Console</h1>
-            <p class="muted">
-                Operational demo environment for Azure API Gateway DSR API.
-                
-            </p>
-            <span class="status">OPS CONSOLE ONLINE</span>
+<div class="container">
+    <div class="card">
+        <h1>DSR API Gateway Ops Console</h1>
+        <p class="muted">Operational demo environment for Azure API Gateway DSR API.</p>
+        <span class="status">OPS CONSOLE ONLINE</span>
+    </div>
+
+    <div class="card">
+        <h2>Environment Status</h2>
+        <table>
+            <tr>
+                <th>Item</th>
+                <th>Status</th>
+                <th>Value</th>
+            </tr>
+            <tr>
+                <td>Ops Console</td>
+                <td class="pass">PASS</td>
+                <td>Enabled</td>
+            </tr>
+            <tr>
+                <td>Backend Runtime</td>
+                <td class="pass">PASS</td>
+                <td>FastAPI</td>
+            </tr>
+            <tr>
+                <td>Data Source Mode</td>
+                <td class="warn">CHECK VIA API</td>
+                <td>Use Basic Status Check</td>
+            </tr>
+            <tr>
+                <td>Virtual Graph Signal</td>
+                <td class="warn">CHECK VIA API</td>
+                <td>Use Virtual Graph Signal Check</td>
+            </tr>
+            <tr>
+                <td>Data Protection</td>
+                <td class="warn">CHECK VIA API</td>
+                <td>Use Data Protection Check</td>
+            </tr>
+            <tr>
+                <td>APIM/JWT Synthetic</td>
+                <td class="warn">CHECK VIA API</td>
+                <td>Use APIM/JWT Synthetic Check</td>
+            </tr>
+            <tr>
+                <td>Full System Check</td>
+                <td class="warn">CHECK VIA API</td>
+                <td>Use Run Full System Check</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>Operational Checks</h2>
+        <p class="muted">
+            Run operational checks for the Enterprise API Gateway POC.
+        </p>
+
+        <button class="button-green" onclick="runCheck('full-check')">Run Full System Check</button>
+        <button class="button-purple" onclick="runCheck('apim-synthetic')">Run APIM/JWT Synthetic Check</button>
+        <button onclick="runCheck('status')">Run Basic Status Check</button>
+        <button onclick="runCheck('graph-signal')">Run Virtual Graph Signal</button>
+        <button onclick="runCheck('data-protection')">Run Data Protection Check</button>
+
+        <pre id="opsResult">Ops Console UI loaded. Run a check.</pre>
+    </div>
+
+    <div class="card">
+        <h2>Partner Request Simulator via APIM</h2>
+        <p class="muted">
+            Submit partner field request through APIM. APIM validates gateway policy, then backend validates partner field-level policy.
+        </p>
+
+        <div class="grid">
+            <div>
+                <label for="partnerId">Partner ID</label>
+                <select id="partnerId">
+                    <option value="partner-a">partner-a</option>
+                    <option value="partner-b">partner-b</option>
+                    <option value="partner-c">partner-c</option>
+                    <option value="partner-d">partner-d</option>
+                    <option value="partner-e">partner-e</option>
+                    <option value="partner-f">partner-f</option>
+                    <option value="partner-g">partner-g</option>
+                </select>
+            </div>
+
+            <div>
+                <label for="requestedFields">Requested Fields</label>
+                <input id="requestedFields" value="a,b,c" placeholder="Example: a,b,c or a,b,internalNote">
+            </div>
         </div>
 
-        <div class="card">
-            <h2>Environment Status</h2>
+        <button class="button-green" onclick="runPartnerMatrixRequest()">Send Request via APIM</button>
+        <button onclick="setExample('a,b,c')">Example Allowed</button>
+        <button onclick="setExample('a,b,internalNote')">Example Denied</button>
+        <button onclick="setExample('a,b,c,d,e,f,AB')">Example Mixed</button>
+
+        <div id="partnerMatrixResult" class="result-box">
+            Partner Matrix result will appear here.
+        </div>
+    </div>
+</div>
+
+<script>
+    const params = new URLSearchParams(window.location.search);
+    const opsKey = params.get("key") || "";
+
+    function escapeHtml(value) {
+        if (value === null || value === undefined) {
+            return "";
+        }
+
+        return String(value)
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll('"', "&quot;")
+            .replaceAll("'", "&#039;");
+    }
+
+    function setExample(value) {
+        document.getElementById("requestedFields").value = value;
+    }
+
+    async function runCheck(checkName) {
+        const resultBox = document.getElementById("opsResult");
+        resultBox.textContent = `Running /ops/api/${checkName} ...`;
+
+        try {
+            const response = await fetch(`/ops/api/${checkName}?key=${encodeURIComponent(opsKey)}`);
+            const data = await response.json();
+            resultBox.textContent = JSON.stringify(data, null, 2);
+        } catch (error) {
+            resultBox.textContent = `ERROR: ${error}`;
+        }
+    }
+
+    function renderPartnerMatrixResult(data) {
+        const wrapper = document.createElement("div");
+
+        const result = data.result || {};
+        const status = result.status || "UNKNOWN";
+        const policyMessage = result.policyMessage || "";
+        const route = data.apimRoute || {};
+
+        const statusClass = status === "ALLOWED" ? "badge-pass" : "badge-fail";
+
+        let html = `
+            <h3>
+                Policy Result:
+                <span class="badge ${statusClass}">${escapeHtml(status)}</span>
+            </h3>
+
+            <p><b>Message:</b> ${escapeHtml(policyMessage)}</p>
+
             <table>
                 <tr>
-                    <th>Item</th>
-                    <th>Status</th>
+                    <th>Gateway Item</th>
                     <th>Value</th>
                 </tr>
                 <tr>
-                    <td>Ops Console</td>
-                    <td class="pass">PASS</td>
-                    <td>Enabled</td>
+                    <td>Called Through APIM</td>
+                    <td>${escapeHtml(route.calledThroughApim)}</td>
                 </tr>
                 <tr>
-                    <td>Backend Runtime</td>
-                    <td class="pass">PASS</td>
-                    <td>FastAPI</td>
+                    <td>APIM Logged</td>
+                    <td>${escapeHtml(route.apimLogged)}</td>
                 </tr>
                 <tr>
-                    <td>Data Source Mode</td>
-                    <td class="warn">CHECK VIA API</td>
-                    <td>Use Basic Status Check</td>
+                    <td>Operation</td>
+                    <td>${escapeHtml(route.operation)}</td>
                 </tr>
                 <tr>
-                    <td>Virtual Graph Signal</td>
-                    <td class="warn">CHECK VIA API</td>
-                    <td>Use Virtual Graph Signal Check</td>
-                </tr>
-                <tr>
-                    <td>Data Protection</td>
-                    <td class="warn">CHECK VIA API</td>
-                    <td>Use Data Protection Check</td>
-                </tr>
-                <tr>
-                    <td>APIM/JWT Synthetic</td>
-                    <td class="warn">CHECK VIA API</td>
-                    <td>Use APIM/JWT Synthetic Check</td>
-                </tr>
-                <tr>
-                    <td>Full System Check</td>
-                    <td class="warn">CHECK VIA API</td>
-                    <td>Use Run Full System Check</td>
+                    <td>HTTP Status Code</td>
+                    <td>${escapeHtml(data.httpStatusCode)}</td>
                 </tr>
             </table>
-        </div>
+        `;
 
-        <div class="card">
-            <h2>Operational Checks</h2>
-            <p class="muted">
-                Đây là bảng kiểm tra vận hành của mô hình Enterprise API Gateway POC.
-                Full System Check sẽ gom basic status, virtual Graph signal, data protection
-                và APIM/JWT synthetic live check.
-            </p>
+        if (result.requestJourney && result.requestJourney.length > 0) {
+            html += `
+                <h3>Request Journey</h3>
+                <table>
+                    <tr>
+                        <th>Step</th>
+                        <th>Description</th>
+                    </tr>
+            `;
 
-            <button id="btn-full-check" class="button-primary">Run Full System Check</button>
-            <button id="btn-apim-synthetic" class="button-apim">Run APIM/JWT Synthetic Check</button>
-            <button id="btn-status">Run Basic Status Check</button>
-            <button id="btn-graph">Run Virtual Graph Signal</button>
-            <button id="btn-data-protection">Run Data Protection Check</button>
+            result.requestJourney.forEach((step, index) => {
+                html += `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${escapeHtml(step)}</td>
+                    </tr>
+                `;
+            });
 
-            <pre id="result">Chưa chạy check.</pre>
-        </div>
-    </div>
-
-    <script>
-        function getOpsKey() {
-            const params = new URLSearchParams(window.location.search);
-            return params.get("key") || "";
+            html += `</table>`;
         }
 
-        function showResult(value) {
-            const result = document.getElementById("result");
-            result.textContent = typeof value === "string"
-                ? value
-                : JSON.stringify(value, null, 2);
+        if (result.allowedData && result.allowedData.length > 0) {
+            html += `
+                <h3>Returned Data</h3>
+                <table>
+                    <tr>
+                        <th>Field</th>
+                        <th>Value</th>
+                        <th>Status</th>
+                    </tr>
+            `;
+
+            result.allowedData.forEach(item => {
+                html += `
+                    <tr>
+                        <td>${escapeHtml(item.field)}</td>
+                        <td>${escapeHtml(item.value)}</td>
+                        <td class="pass">${escapeHtml(item.status)}</td>
+                    </tr>
+                `;
+            });
+
+            html += `</table>`;
         }
 
-        async function callOpsApi(endpoint) {
-            const key = getOpsKey();
-            const url = `${endpoint}?key=${encodeURIComponent(key)}`;
+        if (result.deniedFields && result.deniedFields.length > 0) {
+            html += `
+                <h3>Denied Fields</h3>
+                <p class="fail">${escapeHtml(result.deniedFields.join(", "))}</p>
+            `;
+        }
 
-            showResult(`Running check: ${url}\\nPlease wait...`);
+        if (result.sensitiveViolations && result.sensitiveViolations.length > 0) {
+            html += `
+                <h3>Sensitive Violations</h3>
+                <p class="fail">${escapeHtml(result.sensitiveViolations.join(", "))}</p>
+            `;
+        }
 
-            const controller = new AbortController();
-            const timeoutId = setTimeout(function () {
-                controller.abort();
-            }, 60000);
+        wrapper.innerHTML = html;
+        return wrapper.innerHTML;
+    }
 
-            try {
-                const startedAt = performance.now();
+    async function runPartnerMatrixRequest() {
+        const partnerId = document.getElementById("partnerId").value.trim();
+        const requestedFieldsText = document.getElementById("requestedFields").value.trim();
 
-                const response = await fetch(url, {
-                    method: "GET",
+        const requestedFields = requestedFieldsText
+            .split(",")
+            .map(item => item.trim())
+            .filter(item => item.length > 0);
+
+        const resultBox = document.getElementById("partnerMatrixResult");
+        resultBox.innerHTML = "Running partner request via APIM...";
+
+        try {
+            const response = await fetch(
+                `/ops/api/partner-matrix-request?key=${encodeURIComponent(opsKey)}`,
+                {
+                    method: "POST",
                     headers: {
-                        "Accept": "application/json"
+                        "Content-Type": "application/json"
                     },
-                    signal: controller.signal
-                });
-
-                clearTimeout(timeoutId);
-
-                const durationMs = Math.round(performance.now() - startedAt);
-                const text = await response.text();
-
-                let data;
-                try {
-                    data = JSON.parse(text);
-                } catch {
-                    data = {
-                        status: "FAIL",
-                        message: "Response is not valid JSON",
-                        rawResponse: text
-                    };
+                    body: JSON.stringify({
+                        partnerId: partnerId,
+                        requestedFields: requestedFields
+                    })
                 }
+            );
 
-                showResult({
-                    uiStatus: "COMPLETED",
-                    httpStatus: response.status,
-                    ok: response.ok,
-                    endpoint: endpoint,
-                    durationMs: durationMs,
-                    response: data
-                });
-            } catch (error) {
-                clearTimeout(timeoutId);
-
-                showResult({
-                    uiStatus: "FAILED",
-                    endpoint: endpoint,
-                    message: "Browser could not complete the request",
-                    error: String(error)
-                });
-            }
+            const data = await response.json();
+            resultBox.innerHTML = renderPartnerMatrixResult(data);
+        } catch (error) {
+            resultBox.innerHTML = `<p class="fail">ERROR: ${escapeHtml(error)}</p>`;
         }
-
-        document.addEventListener("DOMContentLoaded", function () {
-            const fullCheckButton = document.getElementById("btn-full-check");
-            const apimSyntheticButton = document.getElementById("btn-apim-synthetic");
-            const statusButton = document.getElementById("btn-status");
-            const graphButton = document.getElementById("btn-graph");
-            const dataProtectionButton = document.getElementById("btn-data-protection");
-
-            fullCheckButton.addEventListener("click", function () {
-                callOpsApi("/ops/api/full-check");
-            });
-
-            apimSyntheticButton.addEventListener("click", function () {
-                callOpsApi("/ops/api/apim-synthetic");
-            });
-
-            statusButton.addEventListener("click", function () {
-                callOpsApi("/ops/api/status");
-            });
-
-            graphButton.addEventListener("click", function () {
-                callOpsApi("/ops/api/graph-signal");
-            });
-
-            dataProtectionButton.addEventListener("click", function () {
-                callOpsApi("/ops/api/data-protection");
-            });
-
-            showResult("Ops Console UI loaded. Bấm một nút để chạy check.");
-        });
-    </script>
+    }
+</script>
 </body>
 </html>
 """
 
 
-@router.get("", response_class=HTMLResponse)
-def ops_console(key: str | None = Query(default=None)):
-    _check_ops_key(key)
-    return HTMLResponse(content=OPS_CONSOLE_HTML)
+@router.get("/ops", response_class=HTMLResponse)
+async def get_ops_console(key: str | None = Query(default=None)):
+    require_ops_key(key)
+    return HTMLResponse(OPS_CONSOLE_HTML)
 
 
-@router.get("/api/status")
-def ops_status(key: str | None = Query(default=None)):
-    _check_ops_key(key)
+@router.get("/ops/api/status")
+async def get_ops_status(key: str | None = Query(default=None)):
+    require_ops_key(key)
 
     return {
         "status": "PASS",
-        "service": "DSR API Gateway Ops Console",
-        "opsConsoleEnabled": _ops_enabled(),
-        "dataSource": os.getenv("DATA_SOURCE", "mock"),
-        "environment": os.getenv("ENVIRONMENT", "local"),
-        "timestampUtc": datetime.now(timezone.utc).isoformat(),
-        "checks": [
-            {
-                "name": "Ops console route",
-                "status": "PASS",
-                "message": "Ops console is reachable",
-            },
-            {
-                "name": "Backend runtime",
-                "status": "PASS",
-                "message": "FastAPI backend is running",
-            },
-            {
-                "name": "Virtual Graph signal",
-                "status": "READY",
-                "message": "Use /ops/api/graph-signal to run the check",
-            },
-            {
-                "name": "Data protection validation",
-                "status": "READY",
-                "message": "Use /ops/api/data-protection to run the check",
-            },
-            {
-                "name": "APIM/JWT synthetic check",
-                "status": "CHECK_VIA_API",
-                "message": "Use /ops/api/apim-synthetic to run the live synthetic check",
-            },
-            {
-                "name": "Full system check",
-                "status": "CHECK_VIA_API",
-                "message": "Use /ops/api/full-check to run the combined operational check",
-            },
-        ],
+        "service": "dsr-api-gateway-ops-console",
+        "runtime": "FastAPI",
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "dataSourceMode": os.getenv("DATA_SOURCE_MODE", "mock"),
+        "opsConsole": "enabled",
     }
 
 
-@router.get("/api/graph-signal")
-def graph_signal(key: str | None = Query(default=None)):
-    _check_ops_key(key)
-    return build_graph_signal()
+@router.get("/ops/api/graph-signal")
+async def get_graph_signal(key: str | None = Query(default=None)):
+    require_ops_key(key)
+
+    return await call_service_function(
+        virtual_graph_service,
+        ["build_graph_signal"],
+    )
 
 
-@router.get("/api/data-protection")
-def data_protection_check(key: str | None = Query(default=None)):
-    _check_ops_key(key)
-    return build_data_protection_report()
+@router.get("/ops/api/data-protection")
+async def get_data_protection(key: str | None = Query(default=None)):
+    require_ops_key(key)
+
+    return await call_service_function(
+        virtual_graph_service,
+        ["build_data_protection_report", "build_data_protection_check"],
+    )
 
 
-@router.get("/api/apim-synthetic")
-def apim_synthetic_check(key: str | None = Query(default=None)):
-    _check_ops_key(key)
-    return build_apim_synthetic_check()
+@router.get("/ops/api/apim-synthetic")
+async def get_apim_synthetic(key: str | None = Query(default=None)):
+    require_ops_key(key)
+
+    return await call_service_function(
+        apim_synthetic_check_service,
+        ["build_apim_synthetic_check"],
+    )
 
 
-@router.get("/api/full-check")
-def full_system_check(key: str | None = Query(default=None)):
-    _check_ops_key(key)
-    return build_full_system_check()
+@router.get("/ops/api/full-check")
+async def get_full_check(key: str | None = Query(default=None)):
+    require_ops_key(key)
+
+    try:
+        return await call_service_function(
+            ops_check_service,
+            ["build_full_system_check", "build_ops_full_check", "build_full_check"],
+        )
+    except HTTPException:
+        status = await get_ops_status(key)
+        graph = await get_graph_signal(key)
+        data_protection = await get_data_protection(key)
+        apim_synthetic = await get_apim_synthetic(key)
+
+        checks = [
+            status,
+            graph,
+            data_protection,
+            apim_synthetic,
+        ]
+
+        failed = [
+            check
+            for check in checks
+            if check.get("status") not in ["PASS", "ALLOWED"]
+            and check.get("overallStatus") != "PASS"
+        ]
+
+        return {
+            "overallStatus": "PASS" if not failed else "FAIL",
+            "summary": {
+                "totalChecks": len(checks),
+                "pass": len(checks) - len(failed),
+                "fail": len(failed),
+                "pending": 0,
+            },
+            "checks": {
+                "status": status,
+                "graphSignal": graph,
+                "dataProtection": data_protection,
+                "apimSynthetic": apim_synthetic,
+            },
+        }
+
+
+@router.post("/ops/api/partner-matrix-request")
+async def post_partner_matrix_request(
+    payload: PartnerMatrixOpsRequest,
+    key: str | None = Query(default=None),
+):
+    require_ops_key(key)
+
+    result = await call_partner_matrix_via_apim(payload)
+
+    return JSONResponse(
+        status_code=200,
+        content=result,
+    )
+def get_partner_gateway_credentials(partner_id: str) -> dict:
+    normalized = partner_id.strip().lower()
+
+    mapping = {
+        "partner-a": {
+            "client_id": os.getenv("PARTNER_A_CLIENT_ID"),
+            "client_secret": os.getenv("PARTNER_A_CLIENT_SECRET"),
+            "apim_key": os.getenv("PARTNER_A_APIM_KEY"),
+        },
+        "partner-b": {
+            "client_id": os.getenv("PARTNER_B_CLIENT_ID"),
+            "client_secret": os.getenv("PARTNER_B_CLIENT_SECRET"),
+            "apim_key": os.getenv("PARTNER_B_APIM_KEY"),
+        },
+    }
+
+    if normalized not in mapping:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No real APIM/Entra credential configured for {partner_id}.",
+        )
+
+    creds = mapping[normalized]
+
+    missing = [
+        name
+        for name, value in creds.items()
+        if not value
+    ]
+
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing credential for {partner_id}: {', '.join(missing)}",
+        )
+
+    return creds
