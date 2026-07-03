@@ -16,7 +16,12 @@ from src.services.dsr_service import (
     get_reference_data,
 )
 from src.services.ai_service import summarize_dsr_request
+from typing import List
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from src.services.partner_matrix_service import evaluate_partner_request
 
 app = FastAPI(
     title="Azure API Gateway DSR AI POC",
@@ -119,7 +124,9 @@ def reference_data(request: Request):
         correlationId=correlation_id,
         data=get_reference_data(),
     )
-
+class PartnerMatrixApiRequest(BaseModel):
+    partnerId: str = Field(..., example="partner-a")
+    requestedFields: List[str] = Field(..., example=["a", "b", "c"])
 
 @app.post("/ai/dsr/summarize", response_model=DsrAiResponse)
 def summarize_dsr(
@@ -128,3 +135,42 @@ def summarize_dsr(
     x_api_key: str = Header(..., alias="x-api-key"),
 ):
     return summarize_dsr_request(request_body)
+
+@app.post("/partner/dsr/matrix-request")
+async def partner_matrix_request(payload: PartnerMatrixApiRequest, request: Request):
+    header_partner_id = request.headers.get("x-partner-id", "").strip().lower()
+    body_partner_id = payload.partnerId.strip().lower()
+
+    if header_partner_id and header_partner_id != body_partner_id:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "DENIED",
+                "reason": "Partner ID in header does not match request body.",
+                "headerPartnerId": header_partner_id,
+                "bodyPartnerId": body_partner_id,
+            },
+        )
+
+    result = evaluate_partner_request(
+        partner_id=body_partner_id,
+        requested_fields=payload.requestedFields,
+    )
+
+    response_body = {
+        "apimGateway": "VERIFIED_BY_BACKEND_POLICY",
+        "requestJourney": [
+            "Partner submitted request",
+            "Request passed through APIM",
+            "Backend received request",
+            "Partner policy evaluated",
+            "DSR matrix filtered",
+            "Response generated",
+        ],
+        **result,
+    }
+
+    if result["status"] == "DENIED":
+        return JSONResponse(status_code=403, content=response_body)
+
+    return response_body

@@ -1,0 +1,21 @@
+{
+  "a": "Môn toán",
+  "b": "Môn lý",
+  "c": "Môn hóa",
+  "d": "Môn sinh",
+  "e": "Môn văn",
+  "f": "Môn anh",
+  "1": "Điểm học kỳ 1",
+  "2": "Điểm học kỳ 2",
+  "3": "Trạng thái đã duyệt",
+  "4": "Trạng thái chờ xử lý",
+  "5": "Ghi chú công khai",
+  "6": "Nhóm phụ trách",
+  "AB": "Mã phân loại bổ sung 0",
+  "AC": "Mã phân loại bổ sung 1",
+  "AD": "Mã phân loại bổ sung 2",
+  "AE": "Mã phân loại bổ sung 3",
+  "AF": "Mã phân loại bổ sung 4",
+  "internalNote": "Ghi chú nội bộ nhạy cảm",
+  "personalData": "Dữ liệu cá nhân nhạy cảm"
+}
