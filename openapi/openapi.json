@@ -1,1 +1,832 @@
-{"openapi":"3.1.0","info":{"title":"Azure API Gateway DSR AI POC","description":"Local POC mô phỏng Azure API Management, Azure Function, Microsoft Graph/SharePoint và OpenAI processing.","version":"0.1.0"},"paths":{"/health":{"get":{"summary":"Health","operationId":"health_health_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/":{"get":{"summary":"Root","operationId":"root__get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/partner/dsr/requests":{"get":{"summary":"List Dsr Requests","operationId":"list_dsr_requests_partner_dsr_requests_get","parameters":[{"name":"pageSize","in":"query","required":false,"schema":{"type":"integer","default":50,"title":"Pagesize"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/DsrListResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/partner/dsr/requests/{requestId}":{"get":{"summary":"Get Dsr Request","operationId":"get_dsr_request_partner_dsr_requests__requestId__get","parameters":[{"name":"requestId","in":"path","required":true,"schema":{"type":"string","title":"Requestid"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/DsrDetailResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/partner/dsr/reference-data":{"get":{"summary":"Reference Data","operationId":"reference_data_partner_dsr_reference_data_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReferenceDataResponse"}}}}}}},"/ai/dsr/summarize":{"post":{"summary":"Summarize Dsr","operationId":"summarize_dsr_ai_dsr_summarize_post","parameters":[{"name":"x-partner-id","in":"header","required":true,"schema":{"type":"string","title":"X-Partner-Id"}},{"name":"x-api-key","in":"header","required":true,"schema":{"type":"string","title":"X-Api-Key"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/DsrAiRequest"}}}},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/DsrAiResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}}},"components":{"schemas":{"DsrAiRequest":{"properties":{"requestId":{"type":"string","title":"Requestid"},"title":{"type":"string","title":"Title"},"status":{"type":"string","title":"Status"},"createdDate":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Createddate"},"updatedDate":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Updateddate"},"hptOwner":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Hptowner"},"sharedNote":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Sharednote"}},"type":"object","required":["requestId","title","status"],"title":"DsrAiRequest"},"DsrAiResponse":{"properties":{"requestId":{"type":"string","title":"Requestid"},"summary":{"type":"string","title":"Summary"},"riskLevel":{"type":"string","title":"Risklevel"},"suggestedAction":{"type":"string","title":"Suggestedaction"},"partnerMessage":{"type":"string","title":"Partnermessage"}},"type":"object","required":["requestId","summary","riskLevel","suggestedAction","partnerMessage"],"title":"DsrAiResponse"},"DsrDetailResponse":{"properties":{"correlationId":{"type":"string","title":"Correlationid"},"data":{"$ref":"#/components/schemas/PublicDsrRequest"}},"type":"object","required":["correlationId","data"],"title":"DsrDetailResponse"},"DsrListResponse":{"properties":{"correlationId":{"type":"string","title":"Correlationid"},"data":{"items":{"$ref":"#/components/schemas/PublicDsrRequest"},"type":"array","title":"Data"},"paging":{"$ref":"#/components/schemas/Paging"}},"type":"object","required":["correlationId","data","paging"],"title":"DsrListResponse"},"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"Paging":{"properties":{"pageSize":{"type":"integer","title":"Pagesize","default":50},"nextToken":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Nexttoken"}},"type":"object","title":"Paging"},"PublicDsrRequest":{"properties":{"requestId":{"type":"string","title":"Requestid"},"title":{"type":"string","title":"Title"},"status":{"type":"string","title":"Status"},"createdDate":{"type":"string","title":"Createddate"},"updatedDate":{"type":"string","title":"Updateddate"},"hptOwner":{"type":"string","title":"Hptowner"},"sharedNote":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Sharednote"}},"type":"object","required":["requestId","title","status","createdDate","updatedDate","hptOwner"],"title":"PublicDsrRequest"},"ReferenceDataResponse":{"properties":{"correlationId":{"type":"string","title":"Correlationid"},"data":{"type":"object","title":"Data"}},"type":"object","required":["correlationId","data"],"title":"ReferenceDataResponse"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"},"input":{"title":"Input"},"ctx":{"type":"object","title":"Context"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Azure API Gateway DSR AI POC",
+    "description": "Local POC mô phỏng Azure API Management, Azure Function, Microsoft Graph/SharePoint và OpenAI processing.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/ops": {
+      "get": {
+        "tags": [
+          "Operations Console"
+        ],
+        "summary": "Ops Console",
+        "operationId": "ops_console_ops_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ops/api/status": {
+      "get": {
+        "tags": [
+          "Operations Console"
+        ],
+        "summary": "Ops Status",
+        "operationId": "ops_status_ops_api_status_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ops/api/graph-signal": {
+      "get": {
+        "tags": [
+          "Operations Console"
+        ],
+        "summary": "Graph Signal",
+        "operationId": "graph_signal_ops_api_graph_signal_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ops/api/data-protection": {
+      "get": {
+        "tags": [
+          "Operations Console"
+        ],
+        "summary": "Data Protection Check",
+        "operationId": "data_protection_check_ops_api_data_protection_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ops/api/apim-synthetic": {
+      "get": {
+        "tags": [
+          "Operations Console"
+        ],
+        "summary": "Apim Synthetic Check",
+        "operationId": "apim_synthetic_check_ops_api_apim_synthetic_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ops/api/full-check": {
+      "get": {
+        "tags": [
+          "Operations Console"
+        ],
+        "summary": "Full System Check",
+        "operationId": "full_system_check_ops_api_full_check_get",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "summary": "Root",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/partner/dsr/requests": {
+      "get": {
+        "summary": "List Dsr Requests",
+        "operationId": "list_dsr_requests_partner_dsr_requests_get",
+        "parameters": [
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Pagesize"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DsrListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/partner/dsr/requests/{requestId}": {
+      "get": {
+        "summary": "Get Dsr Request",
+        "operationId": "get_dsr_request_partner_dsr_requests__requestId__get",
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Requestid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DsrDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/partner/dsr/reference-data": {
+      "get": {
+        "summary": "Reference Data",
+        "operationId": "reference_data_partner_dsr_reference_data_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReferenceDataResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ai/dsr/summarize": {
+      "post": {
+        "summary": "Summarize Dsr",
+        "operationId": "summarize_dsr_ai_dsr_summarize_post",
+        "parameters": [
+          {
+            "name": "x-partner-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Partner-Id"
+            }
+          },
+          {
+            "name": "x-api-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DsrAiRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DsrAiResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/partner/dsr/matrix-request": {
+      "post": {
+        "summary": "Partner Matrix Request",
+        "operationId": "partner_matrix_request_partner_dsr_matrix_request_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PartnerMatrixApiRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DsrAiRequest": {
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "createdDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Createddate"
+          },
+          "updatedDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updateddate"
+          },
+          "hptOwner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hptowner"
+          },
+          "sharedNote": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharednote"
+          }
+        },
+        "type": "object",
+        "required": [
+          "requestId",
+          "title",
+          "status"
+        ],
+        "title": "DsrAiRequest"
+      },
+      "DsrAiResponse": {
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "riskLevel": {
+            "type": "string",
+            "title": "Risklevel"
+          },
+          "suggestedAction": {
+            "type": "string",
+            "title": "Suggestedaction"
+          },
+          "partnerMessage": {
+            "type": "string",
+            "title": "Partnermessage"
+          }
+        },
+        "type": "object",
+        "required": [
+          "requestId",
+          "summary",
+          "riskLevel",
+          "suggestedAction",
+          "partnerMessage"
+        ],
+        "title": "DsrAiResponse"
+      },
+      "DsrDetailResponse": {
+        "properties": {
+          "correlationId": {
+            "type": "string",
+            "title": "Correlationid"
+          },
+          "data": {
+            "$ref": "#/components/schemas/PublicDsrRequest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "correlationId",
+          "data"
+        ],
+        "title": "DsrDetailResponse"
+      },
+      "DsrListResponse": {
+        "properties": {
+          "correlationId": {
+            "type": "string",
+            "title": "Correlationid"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/PublicDsrRequest"
+            },
+            "type": "array",
+            "title": "Data"
+          },
+          "paging": {
+            "$ref": "#/components/schemas/Paging"
+          }
+        },
+        "type": "object",
+        "required": [
+          "correlationId",
+          "data",
+          "paging"
+        ],
+        "title": "DsrListResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "Paging": {
+        "properties": {
+          "pageSize": {
+            "type": "integer",
+            "title": "Pagesize",
+            "default": 50
+          },
+          "nextToken": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nexttoken"
+          }
+        },
+        "type": "object",
+        "title": "Paging"
+      },
+      "PartnerMatrixApiRequest": {
+        "properties": {
+          "partnerId": {
+            "type": "string",
+            "title": "Partnerid",
+            "example": "partner-a"
+          },
+          "requestedFields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requestedfields",
+            "example": [
+              "a",
+              "b",
+              "c"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "partnerId",
+          "requestedFields"
+        ],
+        "title": "PartnerMatrixApiRequest"
+      },
+      "PublicDsrRequest": {
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "createdDate": {
+            "type": "string",
+            "title": "Createddate"
+          },
+          "updatedDate": {
+            "type": "string",
+            "title": "Updateddate"
+          },
+          "hptOwner": {
+            "type": "string",
+            "title": "Hptowner"
+          },
+          "sharedNote": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharednote"
+          }
+        },
+        "type": "object",
+        "required": [
+          "requestId",
+          "title",
+          "status",
+          "createdDate",
+          "updatedDate",
+          "hptOwner"
+        ],
+        "title": "PublicDsrRequest"
+      },
+      "ReferenceDataResponse": {
+        "properties": {
+          "correlationId": {
+            "type": "string",
+            "title": "Correlationid"
+          },
+          "data": {
+            "type": "object",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "correlationId",
+          "data"
+        ],
+        "title": "ReferenceDataResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}
