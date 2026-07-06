@@ -1,8 +1,12 @@
 ﻿import inspect
 import json
 import os
+import time
+import uuid
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Deque, Dict, List
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
@@ -15,6 +19,8 @@ from src.services import virtual_graph_service
 
 
 router = APIRouter()
+
+REQUEST_HISTORY: Deque[Dict[str, Any]] = deque(maxlen=10)
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +43,13 @@ class PartnerMatrixOpsRequest(BaseModel):
     requestedFields: List[str] = Field(..., examples=[["a", "b", "c"]])
     demoUrl: str | None = None
     demoKey: str | None = None
+
+
+class PartnerGovernanceUpdateRequest(BaseModel):
+    partnerId: str = Field(..., examples=["partner-a"])
+    isActive: bool = True
+    expiryDate: str = Field(..., examples=["2026-12-31"])
+    quotaLimit: int = Field(..., ge=1, le=100000)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +87,17 @@ DEMO_PARTNER_ACCESS: Dict[str, Dict[str, str]] = {
         "url": "https://demo.partner-g.local/api",
         "key": "demo-key-g",
     },
+}
+
+
+PARTNER_GOVERNANCE_STATE: Dict[str, Dict[str, Any]] = {
+    partner_id: {
+        "isActive": True,
+        "expiryDate": "2026-12-31",
+        "quotaLimit": 100,
+        "quotaUsed": 0,
+    }
+    for partner_id in DEMO_PARTNER_ACCESS
 }
 
 
@@ -170,6 +194,76 @@ def get_partner_profile(partner_id: str) -> Dict[str, Any]:
         )
 
     return profile
+
+
+
+def get_partner_governance(partner_id: str) -> Dict[str, Any]:
+    normalized = normalize_partner_id(partner_id)
+    state = PARTNER_GOVERNANCE_STATE.get(normalized)
+
+    if not state:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Governance profile not found: {normalized}",
+        )
+
+    return state
+
+
+def validate_partner_governance(partner_id: str) -> Dict[str, Any]:
+    normalized = normalize_partner_id(partner_id)
+    state = get_partner_governance(normalized)
+
+    if not state.get("isActive", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Partner access is disabled.",
+        )
+
+    try:
+        expiry_date = datetime.strptime(
+            str(state.get("expiryDate")),
+            "%Y-%m-%d",
+        ).date()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid expiryDate for {normalized}.",
+        ) from exc
+
+    if expiry_date < datetime.now(timezone.utc).date():
+        raise HTTPException(
+            status_code=403,
+            detail="Partner access has expired.",
+        )
+
+    quota_limit = int(state.get("quotaLimit", 0))
+    quota_used = int(state.get("quotaUsed", 0))
+
+    if quota_used >= quota_limit:
+        raise HTTPException(
+            status_code=429,
+            detail="Partner quota has been exhausted.",
+        )
+
+    return state
+
+
+def build_governance_response(partner_id: str) -> Dict[str, Any]:
+    normalized = normalize_partner_id(partner_id)
+    state = get_partner_governance(normalized)
+
+    quota_limit = int(state.get("quotaLimit", 0))
+    quota_used = int(state.get("quotaUsed", 0))
+
+    return {
+        "partnerId": normalized,
+        "isActive": bool(state.get("isActive", False)),
+        "expiryDate": state.get("expiryDate"),
+        "quotaLimit": quota_limit,
+        "quotaUsed": quota_used,
+        "quotaRemaining": max(quota_limit - quota_used, 0),
+    }
 
 
 def validate_demo_url(partner_id: str, demo_url: str) -> Dict[str, str]:
@@ -321,10 +415,27 @@ async def get_partner_access_token(
     return access_token
 
 
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def add_request_history(entry: Dict[str, Any]) -> None:
+    REQUEST_HISTORY.appendleft(entry)
+
+
+def get_request_history_snapshot() -> List[Dict[str, Any]]:
+    return list(REQUEST_HISTORY)
+
+
 async def call_partner_matrix_via_apim(
     payload: PartnerMatrixOpsRequest,
 ) -> Dict[str, Any]:
     partner_id = normalize_partner_id(payload.partnerId)
+    governance = validate_partner_governance(partner_id)
+    correlation_id = str(uuid.uuid4())
+    started_at = time.perf_counter()
+    timestamp = utc_now_iso()
 
     # When the request originates from the staged UI, verify the demo URL/key
     # again server-side. Frontend state is not security, merely optimism.
@@ -368,6 +479,7 @@ async def call_partner_matrix_via_apim(
     headers = {
         "Content-Type": "application/json",
         "x-partner-id": partner_id,
+        "x-correlation-id": correlation_id,
         "Ocp-Apim-Subscription-Key": credentials["apim_key"],
         "Authorization": f"Bearer {access_token}",
     }
@@ -389,7 +501,32 @@ async def call_partner_matrix_via_apim(
     except Exception:
         response_body = {"rawResponse": response.text}
 
+    duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    policy_status = (
+        response_body.get("status", "UNKNOWN")
+        if isinstance(response_body, dict)
+        else "UNKNOWN"
+    )
+
+    governance["quotaUsed"] = int(governance.get("quotaUsed", 0)) + 1
+
+    history_entry = {
+        "timestamp": timestamp,
+        "correlationId": correlation_id,
+        "partnerId": partner_id,
+        "requestedFields": payload.requestedFields,
+        "policyStatus": policy_status,
+        "httpStatusCode": response.status_code,
+        "durationMs": duration_ms,
+        "operation": "POST /partner/dsr/matrix-request",
+    }
+    add_request_history(history_entry)
+
     return {
+        "timestamp": timestamp,
+        "correlationId": correlation_id,
+        "durationMs": duration_ms,
+        "governance": build_governance_response(partner_id),
         "apimRoute": {
             "gatewayUrl": apim_gateway,
             "apiPath": api_path,
@@ -609,6 +746,60 @@ OPS_CONSOLE_HTML = r"""
             font-size: 13px;
         }
 
+        .scope-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+            margin: 12px 0 18px 0;
+        }
+
+        .scope-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 9px;
+            background: #020617;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 11px;
+        }
+
+        .scope-item input {
+            width: auto;
+            margin: 2px 0 0 0;
+        }
+
+        .scope-name {
+            font-weight: bold;
+            color: #dbeafe;
+        }
+
+        .scope-description {
+            display: block;
+            color: #94a3b8;
+            font-size: 12px;
+            margin-top: 3px;
+        }
+
+        .history-scroll {
+            overflow-x: auto;
+        }
+
+        .mono {
+            font-family: Consolas, monospace;
+            font-size: 12px;
+        }
+
+
+        .admin-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 14px;
+        }
+
+        .admin-grid .full-width {
+            grid-column: 1 / -1;
+        }
+
         @media (max-width: 760px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -700,19 +891,90 @@ OPS_CONSOLE_HTML = r"""
 
         <div id="partnerProfile" class="result-box"></div>
 
-        <label for="requestedFields">Requested Fields</label>
+        <h3>Allowed Scope Discovery</h3>
+        <p class="muted">
+            Only fields granted to this partner are selectable. The backend still validates
+            the final request independently.
+        </p>
+
+        <div id="scopeCheckboxes" class="scope-grid"></div>
+
+        <label for="extraTestField">Optional policy test field</label>
         <input
-            id="requestedFields"
+            id="extraTestField"
             value=""
-            placeholder="Example: a,b,c or a,b,internalNote"
+            placeholder="Example: internalNote"
         >
 
         <button class="button-green" onclick="runPartnerMatrixRequest()">Send Request via APIM</button>
-        <button onclick="fillAllowedFields()">Use All Allowed Fields</button>
-        <button onclick="setSensitiveExample()">Add internalNote Test</button>
+        <button onclick="selectAllAllowedFields()">Select All Allowed</button>
+        <button onclick="clearAllowedFields()">Clear Selection</button>
+        <button onclick="setSensitiveExample()">Test internalNote</button>
 
         <div id="partnerMatrixResult" class="result-box">
             Partner Matrix result will appear here.
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Partner Governance Simulator</h2>
+        <p class="muted">
+            Simulates partner enable/disable, access expiry and request quota.
+            Changes are temporary and reset when the app restarts.
+        </p>
+
+        <div class="admin-grid">
+            <div>
+                <label for="adminPartnerId">Partner</label>
+                <select id="adminPartnerId" onchange="loadGovernanceProfile()">
+                    <option value="partner-a">partner-a</option>
+                    <option value="partner-b">partner-b</option>
+                    <option value="partner-c">partner-c</option>
+                    <option value="partner-d">partner-d</option>
+                    <option value="partner-e">partner-e</option>
+                    <option value="partner-f">partner-f</option>
+                    <option value="partner-g">partner-g</option>
+                </select>
+            </div>
+
+            <div>
+                <label for="adminActive">Access Status</label>
+                <select id="adminActive">
+                    <option value="true">Active</option>
+                    <option value="false">Disabled</option>
+                </select>
+            </div>
+
+            <div>
+                <label for="adminExpiry">Expiry Date</label>
+                <input id="adminExpiry" type="date" value="2026-12-31">
+            </div>
+
+            <div>
+                <label for="adminQuota">Quota Limit</label>
+                <input id="adminQuota" type="number" min="1" value="100">
+            </div>
+
+            <div class="full-width">
+                <button onclick="loadGovernanceProfile()">Load Profile</button>
+                <button class="button-green" onclick="saveGovernanceProfile()">Save Governance</button>
+            </div>
+        </div>
+
+        <div id="governanceResult" class="result-box">
+            Governance profile has not been loaded.
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Recent Request History</h2>
+        <p class="muted">
+            Shows the latest 10 requests stored in this running app instance.
+            Restarting the app clears this temporary history.
+        </p>
+        <button onclick="loadRequestHistory()">Refresh History</button>
+        <div id="requestHistory" class="history-scroll result-box">
+            No request history loaded.
         </div>
     </div>
 </div>
@@ -725,6 +987,26 @@ OPS_CONSOLE_HTML = r"""
     let verifiedDemoKey = "";
     let verifiedPartnerId = "";
     let allowedFields = [];
+
+    const fieldDescriptions = {
+        "a": "Môn toán",
+        "b": "Môn lý",
+        "c": "Môn hóa",
+        "d": "Môn sinh",
+        "e": "Môn văn",
+        "f": "Môn anh",
+        "1": "Data value 1",
+        "2": "Data value 2",
+        "3": "Data value 3",
+        "4": "Data value 4",
+        "5": "Data value 5",
+        "6": "Data value 6",
+        "AB": "Classification AB",
+        "AC": "Classification AC",
+        "AD": "Classification AD",
+        "AE": "Classification AE",
+        "AF": "Classification AF"
+    };
 
     const demoConfig = {
         "partner-a": {
@@ -783,7 +1065,8 @@ OPS_CONSOLE_HTML = r"""
         document.getElementById("keyStep").classList.add("hidden");
         document.getElementById("requestStep").classList.add("hidden");
         document.getElementById("demoKey").value = "";
-        document.getElementById("requestedFields").value = "";
+        document.getElementById("extraTestField").value = "";
+        document.getElementById("scopeCheckboxes").innerHTML = "";
         document.getElementById("urlResult").textContent = "URL has not been verified.";
         document.getElementById("keyResult").textContent = "Key has not been verified.";
         document.getElementById("partnerMatrixResult").textContent =
@@ -802,14 +1085,62 @@ OPS_CONSOLE_HTML = r"""
         document.getElementById("demoKey").value = demoConfig[partnerId].key;
     }
 
-    function fillAllowedFields() {
-        document.getElementById("requestedFields").value = allowedFields.join(",");
+    function renderScopeCheckboxes(fields) {
+        const container = document.getElementById("scopeCheckboxes");
+
+        container.innerHTML = fields.map(field => {
+            const description = fieldDescriptions[field] || "Approved partner field";
+
+            return `
+                <label class="scope-item">
+                    <input
+                        type="checkbox"
+                        class="allowed-field-checkbox"
+                        value="${escapeHtml(field)}"
+                    >
+                    <span>
+                        <span class="scope-name">${escapeHtml(field)}</span>
+                        <span class="scope-description">${escapeHtml(description)}</span>
+                    </span>
+                </label>
+            `;
+        }).join("");
+    }
+
+    function getSelectedAllowedFields() {
+        return Array.from(
+            document.querySelectorAll(".allowed-field-checkbox:checked")
+        ).map(item => item.value);
+    }
+
+    function selectAllAllowedFields() {
+        document
+            .querySelectorAll(".allowed-field-checkbox")
+            .forEach(item => {
+                item.checked = true;
+            });
+    }
+
+    function clearAllowedFields() {
+        document
+            .querySelectorAll(".allowed-field-checkbox")
+            .forEach(item => {
+                item.checked = false;
+            });
+
+        document.getElementById("extraTestField").value = "";
     }
 
     function setSensitiveExample() {
-        const base = allowedFields.slice(0, 2);
-        base.push("internalNote");
-        document.getElementById("requestedFields").value = base.join(",");
+        clearAllowedFields();
+
+        document
+            .querySelectorAll(".allowed-field-checkbox")
+            .forEach((item, index) => {
+                item.checked = index < 2;
+            });
+
+        document.getElementById("extraTestField").value = "internalNote";
     }
 
     async function runCheck(checkName) {
@@ -922,6 +1253,8 @@ OPS_CONSOLE_HTML = r"""
                 <p><b>Partner:</b> ${escapeHtml(data.partnerId)}</p>
                 <p><b>Credential Mode:</b> ${escapeHtml(data.credentialMode)}</p>
                 <p><b>Gateway Mode:</b> ${escapeHtml(data.gatewayMode)}</p>
+                <p><b>Quota Remaining:</b> ${escapeHtml(data.governance?.quotaRemaining)}</p>
+                <p><b>Expiry Date:</b> ${escapeHtml(data.governance?.expiryDate)}</p>
             `;
 
             const chips = allowedFields
@@ -932,11 +1265,15 @@ OPS_CONSOLE_HTML = r"""
                 <h3>Partner Access Profile</h3>
                 <p><b>Partner:</b> ${escapeHtml(data.displayName || data.partnerId)}</p>
                 <p><b>Status:</b> <span class="badge badge-pass">ACTIVE</span></p>
+                <p><b>Expiry:</b> ${escapeHtml(data.governance?.expiryDate)}</p>
+                <p><b>Quota Remaining:</b> ${escapeHtml(data.governance?.quotaRemaining)}</p>
                 <p><b>Allowed Fields:</b></p>
                 <div>${chips}</div>
             `;
 
-            document.getElementById("requestedFields").value = allowedFields.join(",");
+            renderScopeCheckboxes(allowedFields);
+            selectAllAllowedFields();
+            document.getElementById("extraTestField").value = "";
             document.getElementById("requestStep").classList.remove("hidden");
         } catch (error) {
             verifiedDemoKey = "";
@@ -967,6 +1304,10 @@ OPS_CONSOLE_HTML = r"""
                 <tr><td>APIM Logged</td><td>${escapeHtml(route.apimLogged)}</td></tr>
                 <tr><td>Operation</td><td>${escapeHtml(route.operation)}</td></tr>
                 <tr><td>HTTP Status Code</td><td>${escapeHtml(data.httpStatusCode)}</td></tr>
+                <tr><td>Correlation ID</td><td class="mono">${escapeHtml(data.correlationId)}</td></tr>
+                <tr><td>Timestamp</td><td>${escapeHtml(data.timestamp)}</td></tr>
+                <tr><td>Duration</td><td>${escapeHtml(data.durationMs)} ms</td></tr>
+                <tr><td>Quota Remaining</td><td>${escapeHtml(data.governance?.quotaRemaining)}</td></tr>
             </table>
         `;
 
@@ -1026,10 +1367,165 @@ OPS_CONSOLE_HTML = r"""
         return html;
     }
 
+    function renderGovernanceProfile(data) {
+        return `
+            <table>
+                <tr><th>Item</th><th>Value</th></tr>
+                <tr><td>Partner</td><td>${escapeHtml(data.partnerId)}</td></tr>
+                <tr><td>Active</td><td>${escapeHtml(data.isActive)}</td></tr>
+                <tr><td>Expiry Date</td><td>${escapeHtml(data.expiryDate)}</td></tr>
+                <tr><td>Quota Limit</td><td>${escapeHtml(data.quotaLimit)}</td></tr>
+                <tr><td>Quota Used</td><td>${escapeHtml(data.quotaUsed)}</td></tr>
+                <tr><td>Quota Remaining</td><td>${escapeHtml(data.quotaRemaining)}</td></tr>
+            </table>
+        `;
+    }
+
+    async function loadGovernanceProfile() {
+        const partnerId = document.getElementById("adminPartnerId").value;
+        const resultBox = document.getElementById("governanceResult");
+
+        resultBox.textContent = "Loading governance profile...";
+
+        try {
+            const response = await fetch(
+                `/ops/api/partner-governance/${encodeURIComponent(partnerId)}?key=${encodeURIComponent(opsKey)}`
+            );
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(
+                    typeof data.detail === "string"
+                        ? data.detail
+                        : JSON.stringify(data.detail)
+                );
+            }
+
+            document.getElementById("adminActive").value = String(data.isActive);
+            document.getElementById("adminExpiry").value = data.expiryDate;
+            document.getElementById("adminQuota").value = data.quotaLimit;
+            resultBox.innerHTML = renderGovernanceProfile(data);
+        } catch (error) {
+            resultBox.innerHTML = `
+                <p class="fail">GOVERNANCE ERROR: ${escapeHtml(error.message)}</p>
+            `;
+        }
+    }
+
+    async function saveGovernanceProfile() {
+        const partnerId = document.getElementById("adminPartnerId").value;
+        const isActive = document.getElementById("adminActive").value === "true";
+        const expiryDate = document.getElementById("adminExpiry").value;
+        const quotaLimit = Number(document.getElementById("adminQuota").value);
+        const resultBox = document.getElementById("governanceResult");
+
+        resultBox.textContent = "Saving governance profile...";
+
+        try {
+            const response = await fetch(
+                `/ops/api/partner-governance?key=${encodeURIComponent(opsKey)}`,
+                {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        partnerId: partnerId,
+                        isActive: isActive,
+                        expiryDate: expiryDate,
+                        quotaLimit: quotaLimit
+                    })
+                }
+            );
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(
+                    typeof data.detail === "string"
+                        ? data.detail
+                        : JSON.stringify(data.detail)
+                );
+            }
+
+            resultBox.innerHTML = `
+                <p class="pass">GOVERNANCE UPDATED</p>
+                ${renderGovernanceProfile(data)}
+            `;
+        } catch (error) {
+            resultBox.innerHTML = `
+                <p class="fail">SAVE ERROR: ${escapeHtml(error.message)}</p>
+            `;
+        }
+    }
+
+    function renderRequestHistory(items) {
+        if (!items || items.length === 0) {
+            return "<p class='muted'>No requests recorded in this app instance.</p>";
+        }
+
+        let html = `
+            <table>
+                <tr>
+                    <th>Time</th>
+                    <th>Partner</th>
+                    <th>Fields</th>
+                    <th>Result</th>
+                    <th>HTTP</th>
+                    <th>Duration</th>
+                    <th>Correlation ID</th>
+                </tr>
+        `;
+
+        items.forEach(item => {
+            const resultClass =
+                item.policyStatus === "ALLOWED" ? "pass" : "fail";
+
+            html += `
+                <tr>
+                    <td>${escapeHtml(item.timestamp)}</td>
+                    <td>${escapeHtml(item.partnerId)}</td>
+                    <td>${escapeHtml((item.requestedFields || []).join(", "))}</td>
+                    <td class="${resultClass}">${escapeHtml(item.policyStatus)}</td>
+                    <td>${escapeHtml(item.httpStatusCode)}</td>
+                    <td>${escapeHtml(item.durationMs)} ms</td>
+                    <td class="mono">${escapeHtml(item.correlationId)}</td>
+                </tr>
+            `;
+        });
+
+        html += "</table>";
+        return html;
+    }
+
+    async function loadRequestHistory() {
+        const historyBox = document.getElementById("requestHistory");
+        historyBox.innerHTML = "Loading request history...";
+
+        try {
+            const response = await fetch(
+                `/ops/api/request-history?key=${encodeURIComponent(opsKey)}`
+            );
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(
+                    typeof data.detail === "string"
+                        ? data.detail
+                        : JSON.stringify(data.detail)
+                );
+            }
+
+            historyBox.innerHTML = renderRequestHistory(data.items || []);
+        } catch (error) {
+            historyBox.innerHTML = `
+                <p class="fail">HISTORY ERROR: ${escapeHtml(error.message)}</p>
+            `;
+        }
+    }
+
     async function runPartnerMatrixRequest() {
         const partnerId = getSelectedPartner();
-        const requestedFieldsText =
-            document.getElementById("requestedFields").value.trim();
+        const selectedFields = getSelectedAllowedFields();
+        const extraTestField =
+            document.getElementById("extraTestField").value.trim();
         const resultBox = document.getElementById("partnerMatrixResult");
 
         if (
@@ -1043,13 +1539,14 @@ OPS_CONSOLE_HTML = r"""
             return;
         }
 
-        const requestedFields = requestedFieldsText
-            .split(",")
-            .map(item => item.trim())
-            .filter(item => item.length > 0);
+        const requestedFields = [...selectedFields];
+
+        if (extraTestField) {
+            requestedFields.push(extraTestField);
+        }
 
         if (requestedFields.length === 0) {
-            resultBox.innerHTML = `<p class="fail">Enter at least one requested field.</p>`;
+            resultBox.innerHTML = `<p class="fail">Select at least one requested field.</p>`;
             return;
         }
 
@@ -1081,6 +1578,7 @@ OPS_CONSOLE_HTML = r"""
             }
 
             resultBox.innerHTML = renderPartnerMatrixResult(data);
+            await loadRequestHistory();
         } catch (error) {
             resultBox.innerHTML = `<p class="fail">ERROR: ${escapeHtml(error.message)}</p>`;
         }
@@ -1199,6 +1697,7 @@ async def post_partner_access_verify_url(
     require_ops_key(key)
 
     partner_id = normalize_partner_id(payload.partnerId)
+    validate_partner_governance(partner_id)
     validate_demo_url(partner_id, payload.demoUrl)
 
     return JSONResponse(
@@ -1221,6 +1720,7 @@ async def post_partner_access_verify_key(
     require_ops_key(key)
 
     partner_id = normalize_partner_id(payload.partnerId)
+    governance = validate_partner_governance(partner_id)
     validate_demo_key(partner_id, payload.demoUrl, payload.demoKey)
 
     profile = get_partner_profile(partner_id)
@@ -1243,6 +1743,71 @@ async def post_partner_access_verify_key(
                 else "SIMULATED_PROFILE_SHARED_SERVER_CREDENTIAL"
             ),
             "gatewayMode": "REAL_APIM_AFTER_DEMO_VERIFICATION",
+            "governance": build_governance_response(partner_id),
+        },
+    )
+
+
+
+
+@router.get("/ops/api/partner-governance/{partner_id}")
+async def get_partner_governance_profile(
+    partner_id: str,
+    key: str | None = Query(default=None),
+):
+    require_ops_key(key)
+
+    return JSONResponse(
+        status_code=200,
+        content=build_governance_response(partner_id),
+    )
+
+
+@router.post("/ops/api/partner-governance")
+async def update_partner_governance_profile(
+    payload: PartnerGovernanceUpdateRequest,
+    key: str | None = Query(default=None),
+):
+    require_ops_key(key)
+
+    partner_id = normalize_partner_id(payload.partnerId)
+    state = get_partner_governance(partner_id)
+
+    try:
+        datetime.strptime(payload.expiryDate, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="expiryDate must use YYYY-MM-DD format.",
+        ) from exc
+
+    state["isActive"] = payload.isActive
+    state["expiryDate"] = payload.expiryDate
+    state["quotaLimit"] = payload.quotaLimit
+
+    if int(state.get("quotaUsed", 0)) > payload.quotaLimit:
+        state["quotaUsed"] = payload.quotaLimit
+
+    return JSONResponse(
+        status_code=200,
+        content=build_governance_response(partner_id),
+    )
+
+
+@router.get("/ops/api/request-history")
+async def get_request_history(
+    key: str | None = Query(default=None),
+):
+    require_ops_key(key)
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "PASS",
+            "count": len(REQUEST_HISTORY),
+            "maxItems": REQUEST_HISTORY.maxlen,
+            "storageMode": "IN_MEMORY_TEMPORARY",
+            "items": get_request_history_snapshot(),
         },
     )
 
