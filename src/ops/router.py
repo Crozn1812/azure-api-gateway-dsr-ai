@@ -52,19 +52,20 @@ def clean_url_join(base: str, path: str, suffix: str) -> str:
     return f"{base.rstrip('/')}/{path.strip('/')}/{suffix.lstrip('/')}"
 
 
-async def get_partner_access_token() -> str:
-    tenant_id = os.getenv("OPS_TENANT_ID")
-    api_app_id = os.getenv("OPS_DSR_API_APP_ID")
-    client_id = os.getenv("OPS_SYNTHETIC_CLIENT_ID")
-    client_secret = os.getenv("OPS_SYNTHETIC_CLIENT_SECRET")
+async def get_partner_access_token(
+    client_id: str,
+    client_secret: str,
+) -> str:
+    tenant_id = os.getenv("TENANT_ID") or os.getenv("OPS_TENANT_ID")
+    api_app_id = os.getenv("DSR_API_APP_ID") or os.getenv("OPS_DSR_API_APP_ID")
 
     missing = [
         name
         for name, value in {
-            "OPS_TENANT_ID": tenant_id,
-            "OPS_DSR_API_APP_ID": api_app_id,
-            "OPS_SYNTHETIC_CLIENT_ID": client_id,
-            "OPS_SYNTHETIC_CLIENT_SECRET": client_secret,
+            "TENANT_ID": tenant_id,
+            "DSR_API_APP_ID": api_app_id,
+            "CLIENT_ID": client_id,
+            "CLIENT_SECRET": client_secret,
         }.items()
         if not value
     ]
@@ -110,26 +111,22 @@ async def get_partner_access_token() -> str:
 
 
 async def call_partner_matrix_via_apim(payload: PartnerMatrixOpsRequest) -> Dict[str, Any]:
-    apim_gateway = os.getenv("OPS_APIM_GATEWAY_URL")
-    api_path = os.getenv("OPS_API_PATH", "partner-api")
-    subscription_key = os.getenv("OPS_APIM_SUBSCRIPTION_KEY")
+    partner_id = payload.partnerId.strip().lower()
+    credentials = get_partner_gateway_credentials(partner_id)
 
-    missing = [
-        name
-        for name, value in {
-            "OPS_APIM_GATEWAY_URL": apim_gateway,
-            "OPS_APIM_SUBSCRIPTION_KEY": subscription_key,
-        }.items()
-        if not value
-    ]
+    apim_gateway = os.getenv("APIM_GATEWAY") or os.getenv("OPS_APIM_GATEWAY_URL")
+    api_path = os.getenv("API_PATH") or os.getenv("OPS_API_PATH", "partner-api")
 
-    if missing:
+    if not apim_gateway:
         raise HTTPException(
             status_code=500,
-            detail=f"Missing APIM environment variables: {', '.join(missing)}",
+            detail="Missing APIM gateway URL.",
         )
 
-    access_token = await get_partner_access_token()
+    access_token = await get_partner_access_token(
+        credentials["client_id"],
+        credentials["client_secret"],
+    )
 
     endpoint = clean_url_join(
         apim_gateway,
@@ -139,13 +136,13 @@ async def call_partner_matrix_via_apim(payload: PartnerMatrixOpsRequest) -> Dict
 
     headers = {
         "Content-Type": "application/json",
-        "x-partner-id": payload.partnerId,
-        "Ocp-Apim-Subscription-Key": subscription_key,
+        "x-partner-id": partner_id,
+        "Ocp-Apim-Subscription-Key": credentials["apim_key"],
         "Authorization": f"Bearer {access_token}",
     }
 
     request_body = {
-        "partnerId": payload.partnerId,
+        "partnerId": partner_id,
         "requestedFields": payload.requestedFields,
     }
 
@@ -166,6 +163,11 @@ async def call_partner_matrix_via_apim(payload: PartnerMatrixOpsRequest) -> Dict
             "operation": "POST /partner/dsr/matrix-request",
             "calledThroughApim": True,
             "apimLogged": True,
+            "credentialMode": (
+                "real-partner-credential"
+                if partner_id in {"partner-a", "partner-b"}
+                else "simulated-partner-using-partner-a-credential"
+            ),
         },
         "httpStatusCode": response.status_code,
         "result": response_body,
@@ -737,37 +739,50 @@ async def post_partner_matrix_request(
 def get_partner_gateway_credentials(partner_id: str) -> dict:
     normalized = partner_id.strip().lower()
 
-    mapping = {
-        "partner-a": {
-            "client_id": os.getenv("PARTNER_A_CLIENT_ID"),
-            "client_secret": os.getenv("PARTNER_A_CLIENT_SECRET"),
-            "apim_key": os.getenv("PARTNER_A_APIM_KEY"),
-        },
-        "partner-b": {
-            "client_id": os.getenv("PARTNER_B_CLIENT_ID"),
-            "client_secret": os.getenv("PARTNER_B_CLIENT_SECRET"),
-            "apim_key": os.getenv("PARTNER_B_APIM_KEY"),
-        },
+    partner_a = {
+        "client_id": os.getenv("PARTNER_A_CLIENT_ID") or os.getenv("OPS_SYNTHETIC_CLIENT_ID"),
+        "client_secret": os.getenv("PARTNER_A_CLIENT_SECRET") or os.getenv("OPS_SYNTHETIC_CLIENT_SECRET"),
+        "apim_key": os.getenv("PARTNER_A_APIM_KEY") or os.getenv("OPS_APIM_SUBSCRIPTION_KEY"),
     }
 
-    if normalized not in mapping:
+    partner_b = {
+        "client_id": os.getenv("PARTNER_B_CLIENT_ID"),
+        "client_secret": os.getenv("PARTNER_B_CLIENT_SECRET"),
+        "apim_key": os.getenv("PARTNER_B_APIM_KEY"),
+    }
+
+    mapping = {
+        "partner-a": partner_a,
+        "partner-b": partner_b,
+    }
+
+    if normalized in {
+        "partner-c",
+        "partner-d",
+        "partner-e",
+        "partner-f",
+        "partner-g",
+    }:
+        credentials = partner_a
+    else:
+        credentials = mapping.get(normalized)
+
+    if not credentials:
         raise HTTPException(
             status_code=400,
-            detail=f"No real APIM/Entra credential configured for {partner_id}.",
+            detail=f"Unsupported partner: {normalized}",
         )
-
-    creds = mapping[normalized]
 
     missing = [
         name
-        for name, value in creds.items()
+        for name, value in credentials.items()
         if not value
     ]
 
     if missing:
         raise HTTPException(
             status_code=500,
-            detail=f"Missing credential for {partner_id}: {', '.join(missing)}",
+            detail=f"Missing credential for {normalized}: {', '.join(missing)}",
         )
 
-    return creds
+    return credentials
